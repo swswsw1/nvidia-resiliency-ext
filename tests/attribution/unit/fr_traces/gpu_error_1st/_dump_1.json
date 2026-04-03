@@ -1,0 +1,928 @@
+{
+  "version": "2.9",
+  "pg_config": {
+    "0": {
+      "name": "0",
+      "desc": "default_pg",
+      "ranks": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]"
+    },
+    "112": {
+      "name": "112",
+      "desc": "INTRA_DISTRIBUTED_OPTIMIZER_INSTANCE_GROUP",
+      "ranks": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]"
+    },
+    "2": {
+      "name": "2",
+      "desc": "DATA_PARALLEL_GROUP_WITH_CP",
+      "ranks": "[1, 3]"
+    },
+    "33": {
+      "name": "33",
+      "desc": "MODEL_PARALLEL_GROUP",
+      "ranks": "[0, 1, 4, 5, 8, 9, 12, 13]"
+    },
+    "35": {
+      "name": "35",
+      "desc": "TENSOR_MODEL_PARALLEL_GROUP",
+      "ranks": "[0, 1]"
+    },
+    "46": {
+      "name": "46",
+      "desc": "PIPELINE_MODEL_PARALLEL_GROUP",
+      "ranks": "[1, 5, 9, 13]"
+    },
+    "47": {
+      "name": "47",
+      "desc": "EMBEDDING_GROUP",
+      "ranks": "[1, 13]"
+    },
+    "55": {
+      "name": "55",
+      "desc": "TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP",
+      "ranks": "[0, 1, 2, 3]"
+    },
+    "63": {
+      "name": "63",
+      "desc": "TENSOR_AND_CONTEXT_PARALLEL_GROUP",
+      "ranks": "[0, 1]"
+    },
+    "71": {
+      "name": "71",
+      "desc": "EXPERT_MODEL_PARALLEL_GROUP",
+      "ranks": "[0, 1, 2, 3]"
+    },
+    "91": {
+      "name": "91",
+      "desc": "EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP",
+      "ranks": "[0, 1, 2, 3]"
+    },
+    "95": {
+      "name": "95",
+      "desc": "EXPERT_TENSOR_MODEL_PIPELINE_PARALLEL_GROUP",
+      "ranks": "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]"
+    },
+    "97": {
+      "name": "97",
+      "desc": "EXPERT_DATA_PARALLEL_GROUP",
+      "ranks": "[1]"
+    }
+  },
+  "nccl_version": "2.27.3",
+  "pg_status": {
+    "0": {
+      "last_enqueued_collective": 163,
+      "last_started_collective": -1,
+      "last_completed_collective": 163
+    },
+    "1": {
+      "last_enqueued_collective": 286,
+      "last_started_collective": -1,
+      "last_completed_collective": 286
+    },
+    "4": {
+      "last_enqueued_collective": 130,
+      "last_started_collective": -1,
+      "last_completed_collective": 130
+    },
+    "5": {
+      "last_enqueued_collective": 39416,
+      "last_started_collective": -1,
+      "last_completed_collective": 39406
+    },
+    "6": {
+      "last_enqueued_collective": 11986,
+      "last_started_collective": -1,
+      "last_completed_collective": 11983
+    },
+    "7": {
+      "last_enqueued_collective": 27,
+      "last_started_collective": -1,
+      "last_completed_collective": 27
+    },
+    "9": {
+      "last_enqueued_collective": 6874,
+      "last_started_collective": -1,
+      "last_completed_collective": 6873
+    },
+    "11": {
+      "last_enqueued_collective": 3460,
+      "last_started_collective": -1,
+      "last_completed_collective": 3459
+    },
+    "12": {
+      "last_enqueued_collective": 20544,
+      "last_started_collective": -1,
+      "last_completed_collective": 20541
+    },
+    "14": {
+      "last_enqueued_collective": 3434,
+      "last_started_collective": -1,
+      "last_completed_collective": 3433
+    },
+    "15": {
+      "last_enqueued_collective": 26,
+      "last_started_collective": -1,
+      "last_completed_collective": 26
+    },
+    "16": {
+      "last_enqueued_collective": 234,
+      "last_started_collective": -1,
+      "last_completed_collective": 234
+    },
+    "17": {
+      "last_enqueued_collective": 104,
+      "last_started_collective": -1,
+      "last_completed_collective": 104
+    }
+  },
+  "entries": [
+    {
+      "record_id": 86676,
+      "pg_id": 6,
+      "process_group": [
+        "46",
+        "PIPELINE_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "python3",
+      "thread_id": "23456244340032",
+      "collective_seq_id": 26,
+      "p2p_seq_id": 11981,
+      "op_id": 12007,
+      "profiling_name": "nccl:send 0->3",
+      "time_created_ns": 1758610505592730381,
+      "input_sizes": [
+        [
+          4096,
+          1,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "BFloat16"
+      ],
+      "output_sizes": [
+        [
+          4096,
+          1,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "BFloat16"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": true
+    },
+    {
+      "record_id": 86691,
+      "pg_id": 6,
+      "process_group": [
+        "46",
+        "PIPELINE_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "python3",
+      "thread_id": "23456244340032",
+      "collective_seq_id": 26,
+      "p2p_seq_id": 11984,
+      "op_id": 12010,
+      "profiling_name": "nccl:recv 0<-3",
+      "time_created_ns": 1758610505939277224,
+      "input_sizes": [
+        [
+          4096,
+          1,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "BFloat16"
+      ],
+      "output_sizes": [
+        [
+          4096,
+          1,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "BFloat16"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": true
+    },
+    {
+      "record_id": 86692,
+      "pg_id": 5,
+      "process_group": [
+        "35",
+        "TENSOR_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "pt_autograd_1",
+      "thread_id": "23438852638400",
+      "collective_seq_id": 39407,
+      "p2p_seq_id": 0,
+      "op_id": 39407,
+      "profiling_name": "nccl:_all_gather_base",
+      "time_created_ns": 1758610505939759372,
+      "input_sizes": [
+        [
+          4096,
+          1,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "BFloat16"
+      ],
+      "output_sizes": [
+        [
+          8192,
+          1,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "BFloat16"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86693,
+      "pg_id": 12,
+      "process_group": [
+        "71",
+        "EXPERT_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "pt_autograd_1",
+      "thread_id": "23438852638400",
+      "collective_seq_id": 20542,
+      "p2p_seq_id": 0,
+      "op_id": 20542,
+      "profiling_name": "nccl:all_to_all",
+      "time_created_ns": 1758610505939877246,
+      "input_sizes": [
+        [
+          4096,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "BFloat16"
+      ],
+      "output_sizes": [
+        [
+          4034,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "BFloat16"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 600000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86694,
+      "pg_id": 12,
+      "process_group": [
+        "71",
+        "EXPERT_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "pt_autograd_1",
+      "thread_id": "23438852638400",
+      "collective_seq_id": 20543,
+      "p2p_seq_id": 0,
+      "op_id": 20543,
+      "profiling_name": "nccl:all_to_all",
+      "time_created_ns": 1758610505941411405,
+      "input_sizes": [
+        [
+          4034,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "BFloat16"
+      ],
+      "output_sizes": [
+        [
+          4096,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "BFloat16"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 600000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86695,
+      "pg_id": 5,
+      "process_group": [
+        "35",
+        "TENSOR_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "pt_autograd_1",
+      "thread_id": "23438852638400",
+      "collective_seq_id": 39408,
+      "p2p_seq_id": 0,
+      "op_id": 39408,
+      "profiling_name": "nccl:_reduce_scatter_base",
+      "time_created_ns": 1758610505941828173,
+      "input_sizes": [
+        [
+          8192,
+          1,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "BFloat16"
+      ],
+      "output_sizes": [
+        [
+          4096,
+          1,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "BFloat16"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86696,
+      "pg_id": 12,
+      "process_group": [
+        "71",
+        "EXPERT_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "pt_autograd_1",
+      "thread_id": "23438852638400",
+      "collective_seq_id": 20544,
+      "p2p_seq_id": 0,
+      "op_id": 20544,
+      "profiling_name": "nccl:all_to_all",
+      "time_created_ns": 1758610505941915298,
+      "input_sizes": [
+        [
+          4034
+        ]
+      ],
+      "input_dtypes": [
+        "BFloat16"
+      ],
+      "output_sizes": [
+        [
+          4096
+        ]
+      ],
+      "output_dtypes": [
+        "BFloat16"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 600000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86697,
+      "pg_id": 5,
+      "process_group": [
+        "35",
+        "TENSOR_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "pt_autograd_1",
+      "thread_id": "23438852638400",
+      "collective_seq_id": 39409,
+      "p2p_seq_id": 0,
+      "op_id": 39409,
+      "profiling_name": "nccl:_all_gather_base",
+      "time_created_ns": 1758610505942697282,
+      "input_sizes": [
+        [
+          4096,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "Byte"
+      ],
+      "output_sizes": [
+        [
+          8192,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "Byte"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86698,
+      "pg_id": 5,
+      "process_group": [
+        "35",
+        "TENSOR_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "pt_autograd_1",
+      "thread_id": "23438852638400",
+      "collective_seq_id": 39410,
+      "p2p_seq_id": 0,
+      "op_id": 39410,
+      "profiling_name": "nccl:_all_gather_base",
+      "time_created_ns": 1758610505943535758,
+      "input_sizes": [
+        [
+          4096,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "Byte"
+      ],
+      "output_sizes": [
+        [
+          8192,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "Byte"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86699,
+      "pg_id": 5,
+      "process_group": [
+        "35",
+        "TENSOR_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "pt_autograd_1",
+      "thread_id": "23438852638400",
+      "collective_seq_id": 39411,
+      "p2p_seq_id": 0,
+      "op_id": 39411,
+      "profiling_name": "nccl:_reduce_scatter_base",
+      "time_created_ns": 1758610505943652582,
+      "input_sizes": [
+        [
+          8192,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "BFloat16"
+      ],
+      "output_sizes": [
+        [
+          4096,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "BFloat16"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86700,
+      "pg_id": 9,
+      "process_group": [
+        "55",
+        "TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP"
+      ],
+      "thread_name": "pt_autograd_1",
+      "thread_id": "23438852638400",
+      "collective_seq_id": 6874,
+      "p2p_seq_id": 0,
+      "op_id": 6874,
+      "profiling_name": "nccl:all_reduce",
+      "time_created_ns": 1758610505943847409,
+      "input_sizes": [
+        [
+          120
+        ]
+      ],
+      "input_dtypes": [
+        "Float"
+      ],
+      "output_sizes": [
+        [
+          120
+        ]
+      ],
+      "output_dtypes": [
+        "Float"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86701,
+      "pg_id": 6,
+      "process_group": [
+        "46",
+        "PIPELINE_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "python3",
+      "thread_id": "23456244340032",
+      "collective_seq_id": 26,
+      "p2p_seq_id": 11985,
+      "op_id": 12011,
+      "profiling_name": "nccl:send 0->3",
+      "time_created_ns": 1758610505944296787,
+      "input_sizes": [
+        [
+          4096,
+          1,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "BFloat16"
+      ],
+      "output_sizes": [
+        [
+          4096,
+          1,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "BFloat16"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": true
+    },
+    {
+      "record_id": 86702,
+      "pg_id": 6,
+      "process_group": [
+        "46",
+        "PIPELINE_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "python3",
+      "thread_id": "23456244340032",
+      "collective_seq_id": 26,
+      "p2p_seq_id": 11986,
+      "op_id": 12012,
+      "profiling_name": "nccl:recv 0<-1",
+      "time_created_ns": 1758610505944352955,
+      "input_sizes": [
+        [
+          4096,
+          1,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "BFloat16"
+      ],
+      "output_sizes": [
+        [
+          4096,
+          1,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "BFloat16"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": true
+    },
+    {
+      "record_id": 86703,
+      "pg_id": 5,
+      "process_group": [
+        "35",
+        "TENSOR_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "python3",
+      "thread_id": "23456244340032",
+      "collective_seq_id": 39412,
+      "p2p_seq_id": 0,
+      "op_id": 39412,
+      "profiling_name": "nccl:broadcast",
+      "time_created_ns": 1758610505944494286,
+      "input_sizes": [
+        [
+          1,
+          8192
+        ]
+      ],
+      "input_dtypes": [
+        "Long"
+      ],
+      "output_sizes": [
+        [
+          1,
+          8192
+        ]
+      ],
+      "output_dtypes": [
+        "Long"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86704,
+      "pg_id": 5,
+      "process_group": [
+        "35",
+        "TENSOR_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "python3",
+      "thread_id": "23456244340032",
+      "collective_seq_id": 39413,
+      "p2p_seq_id": 0,
+      "op_id": 39413,
+      "profiling_name": "nccl:broadcast",
+      "time_created_ns": 1758610505944525571,
+      "input_sizes": [
+        [
+          1,
+          8192
+        ]
+      ],
+      "input_dtypes": [
+        "Long"
+      ],
+      "output_sizes": [
+        [
+          1,
+          8192
+        ]
+      ],
+      "output_dtypes": [
+        "Long"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86705,
+      "pg_id": 5,
+      "process_group": [
+        "35",
+        "TENSOR_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "python3",
+      "thread_id": "23456244340032",
+      "collective_seq_id": 39414,
+      "p2p_seq_id": 0,
+      "op_id": 39414,
+      "profiling_name": "nccl:_all_gather_base",
+      "time_created_ns": 1758610505944994898,
+      "input_sizes": [
+        [
+          4096,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "Byte"
+      ],
+      "output_sizes": [
+        [
+          8192,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "Byte"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86706,
+      "pg_id": 5,
+      "process_group": [
+        "35",
+        "TENSOR_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "python3",
+      "thread_id": "23456244340032",
+      "collective_seq_id": 39415,
+      "p2p_seq_id": 0,
+      "op_id": 39415,
+      "profiling_name": "nccl:_reduce_scatter_base",
+      "time_created_ns": 1758610505946077024,
+      "input_sizes": [
+        [
+          8192,
+          1,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "BFloat16"
+      ],
+      "output_sizes": [
+        [
+          4096,
+          1,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "BFloat16"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86707,
+      "pg_id": 11,
+      "process_group": [
+        "63",
+        "TENSOR_AND_CONTEXT_PARALLEL_GROUP"
+      ],
+      "thread_name": "python3",
+      "thread_id": "23456244340032",
+      "collective_seq_id": 3460,
+      "p2p_seq_id": 0,
+      "op_id": 3460,
+      "profiling_name": "nccl:all_reduce",
+      "time_created_ns": 1758610505946861014,
+      "input_sizes": [
+        [
+          16
+        ]
+      ],
+      "input_dtypes": [
+        "Long"
+      ],
+      "output_sizes": [
+        [
+          16
+        ]
+      ],
+      "output_dtypes": [
+        "Long"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86708,
+      "pg_id": 14,
+      "process_group": [
+        "91",
+        "EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "python3",
+      "thread_id": "23456244340032",
+      "collective_seq_id": 3434,
+      "p2p_seq_id": 0,
+      "op_id": 3434,
+      "profiling_name": "nccl:_all_gather_base",
+      "time_created_ns": 1758610505947108226,
+      "input_sizes": [
+        [
+          16
+        ]
+      ],
+      "input_dtypes": [
+        "Long"
+      ],
+      "output_sizes": [
+        [
+          64
+        ]
+      ],
+      "output_dtypes": [
+        "Long"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": false
+    },
+    {
+      "record_id": 86709,
+      "pg_id": 5,
+      "process_group": [
+        "35",
+        "TENSOR_MODEL_PARALLEL_GROUP"
+      ],
+      "thread_name": "python3",
+      "thread_id": "23456244340032",
+      "collective_seq_id": 39416,
+      "p2p_seq_id": 0,
+      "op_id": 39416,
+      "profiling_name": "nccl:_all_gather_base",
+      "time_created_ns": 1758610505947275099,
+      "input_sizes": [
+        [
+          4096,
+          1,
+          5120
+        ]
+      ],
+      "input_dtypes": [
+        "BFloat16"
+      ],
+      "output_sizes": [
+        [
+          8192,
+          1,
+          5120
+        ]
+      ],
+      "output_dtypes": [
+        "BFloat16"
+      ],
+      "state": "scheduled",
+      "time_discovered_started_ns": null,
+      "time_discovered_completed_ns": null,
+      "retired": false,
+      "timeout_ms": 180000,
+      "is_p2p": false
+    }
+  ]
+}

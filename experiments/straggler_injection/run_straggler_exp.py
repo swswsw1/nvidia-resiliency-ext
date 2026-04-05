@@ -2,7 +2,7 @@
 Straggler injection experiment for FR-based detection POC.
 
 Based on Megatron-LM's examples/run_simple_mcore_train_loop.py.
-Runs GPT training with TP=2, PP=2, DP=2 on 8 GPUs.
+Runs GPT training with TP=2, PP=1, DP=4 on 8 GPUs.
 Injects host-side or kernel-side stragglers on a configurable rank.
 Dumps FR traces with timing info at the end.
 
@@ -48,7 +48,7 @@ _HIDDEN_SIZE = 256    # large enough for meaningful collectives
 _NUM_ATTN_HEADS = 8
 _VOCAB_SIZE = 1024
 _BATCH_SIZE = 8
-_NUM_MICROBATCHES = 4  # must be >= PP=2
+_NUM_MICROBATCHES = 1
 _NUM_ITERATIONS = 30
 
 
@@ -84,14 +84,17 @@ def parse_args():
 
 def initialize_distributed(
     tensor_model_parallel_size: int = 2,
-    pipeline_model_parallel_size: int = 2,
+    pipeline_model_parallel_size: int = 1,
 ) -> None:
     parallel_state.destroy_model_parallel()
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    dist.init_process_group(
+        backend="nccl", rank=rank, world_size=world_size,
+        device_id=torch.device(f"cuda:{local_rank}"),
+    )
     parallel_state.initialize_model_parallel(
         tensor_model_parallel_size, pipeline_model_parallel_size
     )
@@ -202,7 +205,7 @@ def estimate_gpu_cycles(delay_ms: float) -> int:
 def main():
     args = parse_args()
 
-    initialize_distributed(tensor_model_parallel_size=2, pipeline_model_parallel_size=2)
+    initialize_distributed(tensor_model_parallel_size=2, pipeline_model_parallel_size=1)
     model_parallel_cuda_manual_seed(123)
 
     rank = dist.get_rank()
@@ -211,7 +214,7 @@ def main():
     if rank == 0:
         print(f"Config: inject_type={args.inject_type}, inject_rank={args.inject_rank}, "
               f"inject_delay_ms={args.inject_delay_ms}, output_dir={args.output_dir}")
-        print(f"World size: {dist.get_world_size()}, TP=2, PP=2, DP=2")
+        print(f"World size: {dist.get_world_size()}, TP=2, PP=1, DP=4")
 
     gpt_model = model_provider()
     gpt_model.to(device)

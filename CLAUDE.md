@@ -2,7 +2,7 @@
 
 ## Who I Am
 
-Wei Shen, PhD student at UW CSE. Advised by Ratul Mahajan and Arvind Krishnamurthy. Main codebase collaborator: Seonmyeong Bak (sbak) at NVIDIA, whose manager Amar oversees NVRx. Ratul and sbak's new manager (Phanishayee) know each other from MSR.
+Wei Shen, PhD student at UW CSE. Advised by Ratul Mahajan and Arvind Krishnamurthy. Main codebase collaborator: Seonmyeong Bak (sbak) at NVIDIA, 
 
 ## The Project: FR-Based Straggler Detection
 
@@ -12,14 +12,14 @@ I am building straggler detection for distributed GPU training using PyTorch Fli
 Use FR timestamps to detect and attribute communication stragglers at per-collective, per-PG granularity — distinguishing host-side vs GPU-side stragglers. Reuses the windowing infrastructure from sbak's existing fault attribution code.
 
 ### Why it matters
-The existing CUPTI-based straggler module (and all similar approaches) can only say "rank X was slow in section Y." It cannot tell you which collective was the bottleneck, which PG it belonged to, or whether the slowdown was host-side or GPU-side. FR-based detection fills this gap. See `docs/cupti_vs_fr.md` for the full argument.
+The existing CUPTI-based straggler module (and all similar approaches) can only say "rank X was slow in section Y." It cannot tell you which collective was the bottleneck, which PG it belonged to, or whether the slowdown was host-side or GPU-side. FR-based detection fills this gap. See Section 10 of `design/fr_concepts.md` for the full argument.
 
 ### Two straggler types
 - **Host-side**: late `time_created_ns` — rank's CPU scheduled the collective late. Detectable with default FR (no extra config).
 - **GPU-side**: shortest `gpu_duration` (`completed - started`) — counterintuitive: in synchronous collectives, the late-arriving rank's kernel runs shortest because all ranks finish together. Requires `TORCH_NCCL_ENABLE_TIMING`.
 
 ### Current status: proposal stage, preparing experiments
-- Proposal written: `docs/fr_straggler_design.md` (shared with sbak and Ratul)
+- Proposal written: `design/fr_straggler_design.md` (shared with sbak and Ratul)
 - No straggler detection code yet
 - Need to produce experimental results to convince Ratul → Ratul talks to Amar about collaboration/cluster access
 - sbak said NVIDIA "will make their impl soon" — there is time pressure
@@ -33,7 +33,7 @@ The existing CUPTI-based straggler module (and all similar approaches) can only 
 ### Foundation: windowing + attribution knowledge
 I learned straggler detection's infrastructure by studying sbak's fault attribution code (`fr_attribution.py`). The key shared mechanism is `group_collectives_by_windows()` — it replays all ranks' timelines and groups collectives into `(PG_type, sub_group, window_idx)` buckets via majority-vote wavefront selection. This is what enables cross-rank matching of "the same logical collective" without relying on seq_id alignment (which breaks with p2p). For straggler detection, the same windowing gives us the buckets within which to compare timing across ranks.
 
-See `docs/fr_concepts.md` for detailed reference on FR dump structure, ID systems, windowing mechanism, and timestamps.
+See `design/fr_concepts.md` for detailed reference on FR dump structure, ID systems, windowing mechanism, and timestamps.
 
 ### Immediate TODOs (what Ratul wants)
 1. **Run straggler injection experiment** — inject slowness (host-side and kernel-side), show FR-based approach catches it. sbak confirmed CUPTI-based detector misses comm kernel stragglers (it filters NCCL kernels out).
@@ -59,9 +59,32 @@ See `docs/fr_concepts.md` for detailed reference on FR dump structure, ID system
 - `tests/straggler/unit/` — straggler unit tests
 
 ### My docs
-- `docs/fr_straggler_design.md` — straggler detection proposal (actively updating)
-- `docs/fr_concepts.md` — FR concept quick reference
-- `docs/cupti_vs_fr.md` — why FR works for distributed straggler detection and CUPTI doesn't
+- `design/fr_straggler_design.md` — straggler detection proposal (actively updating)
+- `design/fr_concepts.md` — FR concept quick reference
+
+@design/fr_concepts.md
+@design/fr_straggler_design.md
+
+## NVRx Architecture
+
+Source lives in `src/nvidia_resiliency_ext/`. Key modules:
+
+- **`fault_tolerance/`** — In-job restart without reallocating SLURM nodes. `ft_launcher` CLI, gRPC rank monitoring, section-based timeout model (`begin_section`/`end_section`).
+- **`inprocess/`** — Detect failures and restart within a single process. Wraps training function with `Wrapper`/`Compose`; background monitors detect hangs; dynamic rank reassignment on restart.
+- **`checkpointing/`** — `async_ckpt/` (background saves) and `local/` (fast local-storage saves).
+- **`attribution/`** — `straggler/` (CUPTI-based, the baseline I'm extending), `trace_analyzer/` (FR attribution pipeline — sbak's code), LLM log analysis pipeline, MCP server.
+- **`ptl_resiliency/`** — PyTorch Lightning callbacks wrapping the above.
+- **`shared_utils/`** — Health checks (NVML/gRPC), structured logging, centralized log collection, GPU memory logging.
+- **`services/`** — Standalone services at repo root (not inside `src/`): `nvrx_attrsvc/` (FastAPI LLM log analysis), `nvrx_smonsvc/` (SLURM job monitor).
+
+## Key Environment Variables
+
+| Variable | Purpose |
+|---|---|
+| `STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD=1` | Skip CUPTI C++ build (use when no GPU/CUDA) |
+| `NVRX_LOG_DEBUG=1` | Enable debug logging |
+| `CUDA_PATH` | Override CUDA installation path (auto-detected otherwise) |
+| `TORCH_NCCL_ENABLE_TIMING=1` | Enable FR GPU-side timestamps (Layer 3, opt-in overhead) |
 
 ## Build and Test
 
@@ -69,11 +92,21 @@ See `docs/fr_concepts.md` for detailed reference on FR dump structure, ID system
 # Install from source (skip CUPTI if no GPU)
 STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD=1 pip install .
 
-# Run attribution tests
+# Run tests by module
 pytest -s -vvv ./tests/attribution/unit/
+pytest -s -vvv ./tests/straggler/unit/
+pytest -s -vvv ./tests/fault_tolerance/unit/
+pytest -s -vvv ./tests/inprocess/
+pytest -s -vvv ./tests/checkpointing/unit/
+pytest -s -vvv ./tests/ptl_resiliency/unit/
 
-# Run straggler tests (CPU-only subset)
+# Straggler CPU-only subset (no CUPTI needed)
 pytest -s -vvv tests/straggler/unit/ -k "test_all_gather_object_calls_num or test_fail_if_not_initialized"
+
+# Notes:
+# - Functional tests (func/) require multi-GPU/SLURM — not run in standard CI
+# - MKL_SERVICE_FORCE_INTEL=1 may be needed for MKL threading issues
+# - Install wheel before CI: pip install ./dist/nvidia_resiliency_ext-*-cp${PY_VER}-*.whl
 
 # Format / lint (black==24.10.0, isort==5.13.2 profile="black", ruff==0.6.9, line length 100)
 black . && isort . && ruff check .
@@ -100,10 +133,13 @@ black . && isort . && ruff check .
 | host_delay | `time_discovered_started_ns - time_created_ns` |
 | gpu_duration | `time_discovered_completed_ns - time_discovered_started_ns` |
 
-For deeper reference: `docs/fr_concepts.md`
+For deeper reference: `design/fr_concepts.md`
 
 ## Code Quality
 
-- All commits GPG-signed, format: `#<Issue Number> - <Commit Title>`
+- All commits GPG-signed (`git commit -S`), format: `#<Issue Number> - <Commit Title>` (imperative mood)
 - PR prefix `[WIP]` while under review
-- Contributions through personal forks
+- Contributions through personal forks; do not push directly to upstream
+- All changes must begin with a tracked issue, approved by NVRx engineers before code review starts
+- New components require an accompanying README and at least one test
+- Build log must be clean (no warnings or errors) before submitting a PR

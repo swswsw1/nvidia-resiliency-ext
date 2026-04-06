@@ -269,3 +269,75 @@ for iteration in range(num_iterations):
 2. **Host-side run**: Rank 3's `time_created_ns` is visibly later than other ranks in injection iterations
 3. **Kernel-side run**: Rank 3's `time_created_ns` is normal but `time_discovered_started_ns` is late, `gpu_duration` is shorter than peers
 4. **Sanity check**: Run `group_collectives_by_windows()` on the traces to verify windowing produces meaningful buckets with multiple PG types (TP, DP)
+
+---
+
+## Trace Analysis
+
+### Context
+
+Traces collected (4 runs: 2× baseline, 1× host, 1× kernel). All ranks completed 30 iterations, 664 entries per rank, all `state: completed` with all three timestamps populated. Now analyzing the timing signals to verify straggler detection feasibility.
+
+### Key observation: kernel injection produces same signal as host injection
+
+Both host and kernel injection show ~50ms `time_created_ns` delay on rank 3. For kernel injection, this is unexpected — `cuda._sleep` should only delay the GPU stream, not the CPU. The delay propagates because the training loop has implicit sync points: `optim.step()` → next iteration's `forward()` launches CUDA ops that must wait for the previous iteration's GPU work to drain. So the CPU can't enqueue new collectives until the GPU catches up, causing `time_created_ns` to be late even though the injection was GPU-side.
+
+This means **our current traces cannot distinguish host vs kernel stragglers**. Both show the same `time_created_ns` pattern. The `gpu_duration` (completed - started) is ~0µs everywhere because the model is too small for meaningful kernel time. TODO: revisit with a larger model or different injection point to get a genuine kernel-only signal.
+
+### What we're building: standalone FR straggler analyzer
+
+**File**: `experiments/straggler_injection/fr_straggler_analyzer.py`
+
+Standalone script (no integration into CollectiveAnalyzer yet). Reads a trace directory, applies windowing, computes per-window per-rank timing statistics, identifies straggler ranks per window, builds causal graph, and traces attribution to root-cause PG/rank.
+
+**Data flow**:
+```
+Load trace dir → Parse entries (completed only) → Build collectives_by_file
+  → group_collectives_by_windows()
+  → Per-window per-rank stats (all 3 timing signals)
+  → Identify straggler rank(s) per window (max deviation from median, simple threshold)
+  → Build PG overlap graph (PGs sharing ranks get edges)
+  → Graph traversal to find root-cause PG (earliest straggler in causal chain)
+  → Print results + ground truth comparison
+```
+
+**Entry loading**: Adapted from `fr_attribution.py:process_file` (lines 940-1037). Key change: filter `state == 'completed'` instead of `scheduled`.
+
+**Windowing**: Reuses the logic of `group_collectives_by_windows` (fr_attribution.py:339-456) as a standalone function.
+
+**Per-window statistics** (all three timing signals):
+1. `time_created_ns` — relative to window-wide min → "how late was each rank's CPU"
+2. `time_discovered_started_ns` — relative to window-wide min → "how late did each rank's GPU start"
+3. `gpu_duration` = `completed_ns - started_ns` → "how long did each rank's comm kernel run"
+
+**Straggler identification per window**: Simple initial approach — compute median across ranks for each signal; rank whose mean deviation from median is largest and exceeds a threshold (e.g., >5ms) is flagged as straggler for that window. This is the analog of "missing ranks" in fault attribution — it's the input to the graph traversal.
+
+**Graph traversal**: Same logic as `group_pgs` (fr_attribution.py:770-938). PGs that share any rank get an edge. DFS with monotonicity constraint (lower → higher scheduling order). Head of each chain = root-cause PG. The straggler rank(s) in that head PG are the root cause.
+
+**Output**: Mimics fr_attribution tabular style. Summary + `-v` for full per-rank breakdown. Ground truth comparison from `run_config.log`.
+
+**CLI**:
+```bash
+python fr_straggler_analyzer.py /path/to/trace_dir              # summary
+python fr_straggler_analyzer.py /path/to/trace_dir -v           # detailed per-window
+python fr_straggler_analyzer.py /path/to/trace_dir --pg TENSOR  # filter by PG name
+```
+
+### Files
+
+| File | Role |
+|------|------|
+| `experiments/straggler_injection/fr_straggler_analyzer.py` | **NEW** — standalone analyzer |
+| `src/.../trace_analyzer/fr_attribution.py` | Reference for windowing (lines 339-456), graph traversal (lines 770-938), entry parsing (lines 940-1037) |
+
+### What we do NOT do yet
+
+- No integration into CollectiveAnalyzer / NVRxAttribution pipeline
+- No kernel vs host distinction algorithm (open question — needs better traces)
+
+### Analyzer verification
+
+1. Run on baseline → no rank stands out (all diffs <2ms)
+2. Run on host trace → rank 3 shows ~50ms `time_created_ns` deviation, graph traversal traces to root-cause PG
+3. Run on kernel trace → rank 3 shows ~54ms deviation (implicit sync propagation)
+4. Compare against `run_config.log` ground truth

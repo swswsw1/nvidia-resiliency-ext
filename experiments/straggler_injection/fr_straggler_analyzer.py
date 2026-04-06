@@ -384,101 +384,111 @@ def compute_window_stats(
 
 
 # ---------------------------------------------------------------------------
-# 4. PG overlap graph + graph traversal for root cause
+# 4. Group PGs by temporal order
 #    Adapted from fr_attribution.py:group_pgs (lines 770-938)
+#
+#    Builds a PG overlap graph and finds longest paths via DFS with
+#    monotonicity on global_idx (scheduling order). Head of each path
+#    is the wavefront PG — its straggler ranks are the root cause.
 # ---------------------------------------------------------------------------
 
-def build_pg_overlap_graph(
+
+def group_pgs_temporal(
     window_stats: Dict[Tuple[str, str, int], WindowStats],
-    pg_configs: Dict[str, dict],
     collectives_to_order: Dict[Tuple[str, str, int], int],
-) -> Tuple[Dict[int, Set[int]], Dict[int, Tuple[str, str, int]], Dict[int, Set[str]]]:
+) -> Dict[int, List[Tuple[str, str, int]]]:
     """
-    Build graph where PG windows with straggler ranks are nodes,
-    connected by edges if they share any ranks.
+    Group straggler PG windows by finding longest paths in the overlap graph.
+    Adapted from fr_attribution.py:group_pgs.
+
+    Nodes = PG windows with straggler ranks.
+    Edges = PG windows sharing any participating rank.
+    DFS with monotonicity: only traverse lower → higher scheduling order (global_idx).
+    Longest paths are kept; subset paths are removed.
 
     Returns:
-        graph: node_id -> set of neighbor node_ids
-        node_to_key: node_id -> window key (megatron_id, pg_desc, window_idx)
-        node_to_straggler_ranks: node_id -> set of straggler rank_ids
+        grouped_pgs: group_id -> list of window keys in path order (head first)
     """
-    # Only include windows that have straggler ranks
     straggler_windows = {
         k: ws for k, ws in window_stats.items() if ws.straggler_ranks
     }
-
     if not straggler_windows:
-        return {}, {}, {}
+        return {}
 
-    # Assign integer node IDs
+    # Map window keys → integer node IDs
     keys = sorted(straggler_windows.keys(), key=lambda k: collectives_to_order.get(k, 0))
     key_to_node = {k: i for i, k in enumerate(keys)}
     node_to_key = {i: k for k, i in key_to_node.items()}
-    node_to_straggler_ranks = {i: straggler_windows[k].straggler_ranks for k, i in key_to_node.items()}
 
-    # Get all participating ranks per window (not just stragglers)
-    node_to_all_ranks: Dict[int, Set[str]] = {}
-    for k, ws in straggler_windows.items():
-        node_id = key_to_node[k]
-        node_to_all_ranks[node_id] = set(ws.rank_stats.keys())
+    # All participating ranks per window (edges based on full membership, not just stragglers)
+    node_ranks: Dict[int, Set[str]] = {
+        key_to_node[k]: set(ws.rank_stats.keys()) for k, ws in straggler_windows.items()
+    }
 
-    # Build adjacency: PGs sharing any rank get an edge
+    # Build adjacency: PG windows sharing any rank get an edge
     graph: Dict[int, Set[int]] = defaultdict(set)
     node_ids = list(node_to_key.keys())
-    for i, n1 in enumerate(node_ids):
-        graph[n1].add(n1)  # self-loop
-        for j, n2 in enumerate(node_ids):
-            if i != j and node_to_all_ranks[n1] & node_to_all_ranks[n2]:
+    for n1 in node_ids:
+        graph[n1].add(n1)
+        for n2 in node_ids:
+            if n1 != n2 and node_ranks[n1] & node_ranks[n2]:
                 graph[n1].add(n2)
 
-    return dict(graph), node_to_key, node_to_straggler_ranks
+    # DFS with monotonicity on global_idx to find longest paths
+    def dfs(node: int, path: List[int], visited: Set[int]) -> List[List[int]]:
+        if node in visited:
+            return [path]
+        visited = visited | {node}
+        path = path + [node]
+        node_order = collectives_to_order.get(node_to_key[node], 0)
 
+        forward = [
+            nb for nb in graph[node]
+            if nb not in visited
+            and collectives_to_order.get(node_to_key[nb], 0) >= node_order
+        ]
+        if not forward:
+            return [path]
 
-def find_root_cause_pgs(
-    graph: Dict[int, Set[int]],
-    node_to_key: Dict[int, Tuple[str, str, int]],
-    node_to_straggler_ranks: Dict[int, Set[str]],
-    collectives_to_order: Dict[Tuple[str, str, int], int],
-) -> List[Tuple[Tuple[str, str, int], Set[str]]]:
-    """
-    Find root-cause PGs via DFS with monotonicity constraint.
-    The head of each causal chain is the root-cause PG.
+        results = []
+        for nb in forward:
+            results.extend(dfs(nb, path, visited))
+        return results
 
-    Returns list of (window_key, straggler_ranks) for head PGs.
-    """
-    if not graph:
-        return []
-
-    # Find the head nodes: nodes with lowest scheduling order that start causal chains
-    # DFS from each unvisited node, following edges only to higher-order nodes
-    visited = set()
-    head_nodes = []
-
-    # Sort by scheduling order (earliest first)
-    sorted_nodes = sorted(node_to_key.keys(), key=lambda n: collectives_to_order.get(node_to_key[n], 0))
-
-    for start_node in sorted_nodes:
-        if start_node in visited:
+    # Start from each unvisited node (largest PGs first, matching attribution)
+    visited_global: Set[int] = set()
+    all_paths: List[List[int]] = []
+    for start in sorted(node_ids, key=lambda n: len(node_ranks.get(n, set())), reverse=True):
+        if start in visited_global:
             continue
+        seen: Set[Tuple[int, ...]] = set()
+        for path in dfs(start, [], set()):
+            pt = tuple(path)
+            if pt not in seen:
+                seen.add(pt)
+                for n in path:
+                    visited_global.add(n)
+                all_paths.append(path)
 
-        # This node hasn't been reached by any earlier chain — it's a head
-        head_nodes.append(start_node)
+    # Remove subset paths
+    unique: List[List[int]] = []
+    for i, p1 in enumerate(all_paths):
+        s1 = set(p1)
+        is_sub = False
+        for j, p2 in enumerate(all_paths):
+            if i != j:
+                s2 = set(p2)
+                if s1 < s2:
+                    is_sub = True
+                    break
+                if s1 == s2 and p1 not in unique and p2 not in unique:
+                    unique.append(p1)
+                    is_sub = True
+                    break
+        if not is_sub:
+            unique.append(p1)
 
-        # DFS to mark all reachable nodes (following monotonicity)
-        stack = [start_node]
-        while stack:
-            node = stack.pop()
-            if node in visited:
-                continue
-            visited.add(node)
-            node_order = collectives_to_order.get(node_to_key[node], 0)
-            for neighbor in graph.get(node, set()):
-                if neighbor not in visited:
-                    neighbor_order = collectives_to_order.get(node_to_key[neighbor], 0)
-                    if neighbor_order >= node_order:
-                        stack.append(neighbor)
-
-    return [(node_to_key[n], node_to_straggler_ranks[n]) for n in head_nodes]
+    return {gid: [node_to_key[n] for n in path] for gid, path in enumerate(unique)}
 
 
 # ---------------------------------------------------------------------------
@@ -503,17 +513,17 @@ def load_ground_truth(trace_dir: str) -> Optional[dict]:
 def print_summary(
     all_window_stats: Dict[Tuple[str, str, int], WindowStats],
     collectives_to_order: Dict[Tuple[str, str, int], int],
-    root_causes: List[Tuple[Tuple[str, str, int], Set[str]]],
+    grouped_pgs: Dict[int, List[Tuple[str, str, int]]],
     pg_filter: Optional[str] = None,
 ):
-    """Print summary table of windows with stragglers."""
+    """Print summary table of windows with stragglers, plus grouped PG paths."""
     logger.info("\n=== Straggler Analysis Summary ===\n")
 
     # Header
     logger.info(
-        f"{'PG Desc':<40} | {'Win':>3} | {'Ranks':>20} | {'Straggler':>8} | {'Signal':<40}"
+        f"{'GIdx':>4} | {'PG Desc':<40} | {'Win':>3} | {'Ranks':>20} | {'Straggler':>8} | {'Signal':<40}"
     )
-    logger.info("-" * 120)
+    logger.info("-" * 130)
 
     straggler_window_count = 0
     total_windows = 0
@@ -526,6 +536,7 @@ def print_summary(
             continue
 
         total_windows += 1
+        gidx = collectives_to_order.get(key, -1)
         participating_ranks = sorted(int(r) for r in ws.rank_stats.keys())
         ranks_str = ",".join(str(r) for r in participating_ranks)
 
@@ -538,20 +549,30 @@ def print_summary(
             signal_str = ""
 
         logger.info(
-            f"{pg_desc:<40} | {window_idx:>3} | {ranks_str:>20} | {straggler_str:>8} | {signal_str:<40}"
+            f"{gidx:>4} | {pg_desc:<40} | {window_idx:>3} | {ranks_str:>20} | {straggler_str:>8} | {signal_str:<40}"
         )
 
     logger.info(f"\nWindows with stragglers: {straggler_window_count}/{total_windows}")
 
-    # Root cause summary
-    if root_causes:
-        logger.info("\n=== Root Cause Attribution ===\n")
-        for key, straggler_ranks in root_causes:
-            megatron_id, pg_desc, window_idx = key
-            ranks_str = ",".join(sorted(straggler_ranks, key=int))
-            logger.info(f"  Root cause PG: {pg_desc} (window {window_idx}) — straggler rank(s): {ranks_str}")
+    # Grouped PG paths (temporal order)
+    if grouped_pgs:
+        logger.info("\n=== Grouped PG Paths (temporal order) ===\n")
+        for group_id, path_keys in grouped_pgs.items():
+            head_key = path_keys[0]
+            head_ws = all_window_stats[head_key]
+            head_ranks = ",".join(sorted(head_ws.straggler_ranks, key=int))
+            logger.info(f"  Path {group_id} (head straggler rank(s): {head_ranks}):")
+            for step, key in enumerate(path_keys):
+                megatron_id, pg_desc, window_idx = key
+                ws = all_window_stats[key]
+                gidx = collectives_to_order.get(key, -1)
+                straggler_str = ",".join(sorted(ws.straggler_ranks, key=int))
+                marker = " <-- HEAD" if step == 0 else ""
+                logger.info(
+                    f"    [{gidx:>3}] {pg_desc:<40} win={window_idx} straggler={straggler_str}{marker}"
+                )
     else:
-        logger.info("\nNo straggler causal chains found.")
+        logger.info("\nNo grouped PG paths found.")
 
 
 def print_detailed(
@@ -655,27 +676,26 @@ def analyze(trace_dir: str, verbose: bool = False, pg_filter: Optional[str] = No
         ranks = set(c.file_id for c in windows[key])
         logger.info(f"  ({megatron_id}, {pg_desc}, win={window_idx}): {len(windows[key])} entries, ranks={sorted(ranks, key=int)}")
 
-    # Build scheduling order (global index for each window key)
-    collectives_to_order: Dict[Tuple[str, str, int], int] = {}
-    for idx, key in enumerate(windows.keys()):
-        collectives_to_order[key] = idx
+    # Build scheduling order (global_idx for each window key).
+    # default_pg is pinned to the end so it's always a tail in DFS,
+    # never a root-cause head (matches old attribution's DEFAULT_PG_ORDER).
+    regular_keys = [k for k in windows if k[1] != "default_pg"]
+    default_keys = [k for k in windows if k[1] == "default_pg"]
+    collectives_to_order = {k: i for i, k in enumerate(regular_keys + default_keys)}
 
     # 3. Per-window stats + straggler identification
     all_window_stats: Dict[Tuple[str, str, int], WindowStats] = {}
     for key, colls in windows.items():
         all_window_stats[key] = compute_window_stats(key, colls, threshold_ms=threshold_ms)
 
-    # 4. Graph traversal for root cause
-    graph, node_to_key, node_to_straggler_ranks = build_pg_overlap_graph(
-        all_window_stats, pg_configs, collectives_to_order
-    )
-    root_causes = find_root_cause_pgs(graph, node_to_key, node_to_straggler_ranks, collectives_to_order)
+    # 4. Group PGs by temporal order (graph traversal for root cause)
+    grouped_pgs = group_pgs_temporal(all_window_stats, collectives_to_order)
 
     # 5. Output
     if verbose:
         print_detailed(all_window_stats, collectives_to_order, pg_filter)
 
-    print_summary(all_window_stats, collectives_to_order, root_causes, pg_filter)
+    print_summary(all_window_stats, collectives_to_order, grouped_pgs, pg_filter)
 
     # 6. Ground truth
     ground_truth = load_ground_truth(trace_dir)

@@ -335,9 +335,18 @@ python fr_straggler_analyzer.py /path/to/trace_dir --pg TENSOR  # filter by PG n
 - No integration into CollectiveAnalyzer / NVRxAttribution pipeline
 - No kernel vs host distinction algorithm (open question — needs better traces)
 
-### Analyzer verification
+### Analyzer results
 
-1. Run on baseline → no rank stands out (all diffs <2ms)
-2. Run on host trace → rank 3 shows ~50ms `time_created_ns` deviation, graph traversal traces to root-cause PG
-3. Run on kernel trace → rank 3 shows ~54ms deviation (implicit sync propagation)
-4. Compare against `run_config.log` ground truth
+Analysis logs saved alongside each trace directory as `analysis.log` (generated with `-v` for full per-rank breakdown):
+- `traces/20260405_135228_none/analysis.log` — baseline 1
+- `traces/20260405_135545_none/analysis.log` — baseline 2
+- `traces/20260405_135639_host/analysis.log` — host injection (rank 3, 50ms)
+- `traces/20260405_135842_kernel/analysis.log` — kernel injection (rank 3, 50ms)
+
+Both injection traces correctly identify rank 3 as root-cause via TP[2,3] (head of causal chain). Kernel injection produces the same `time_created_ns` signal as host injection due to implicit sync propagation (see "Key observation" above). Baselines have minor false positives (1-2/7 windows, init noise in default_pg).
+
+### What's next
+
+- Per-iteration analysis: with PP=1, windowing gives 1 window per PG (all ~30 iterations lumped). Need a different slicing mechanism for per-iteration resolution. Fine for POC but won't work for real workloads with intermittent stragglers.
+- Kernel vs host distinction: need larger model (meaningful `gpu_duration`) or different injection point to produce a genuine GPU-only signal without implicit sync propagation.
+- Threshold tuning: current 5ms threshold works for 50ms injection; need to validate with smaller delays and noisier environments.

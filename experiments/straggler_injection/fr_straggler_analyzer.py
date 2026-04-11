@@ -710,6 +710,14 @@ def main():
     parser.add_argument("--threshold-ms", type=float, default=5.0,
                         help="Straggler detection threshold in ms (default: 5.0)")
     args = parser.parse_args()
+
+    # Auto-save output to {trace_dir}/analysis.log alongside run_config.log
+    log_path = os.path.join(args.trace_dir, "analysis.log")
+    file_handler = logging.FileHandler(log_path, mode="w")
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(file_handler)
+    logger.info(f"Auto-saving output to {log_path}")
+
     analyze(args.trace_dir, verbose=args.verbose, pg_filter=args.pg, threshold_ms=args.threshold_ms)
 
 

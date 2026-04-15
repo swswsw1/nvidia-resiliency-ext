@@ -347,6 +347,18 @@ Both injection traces correctly identify rank 3 as root-cause via TP[2,3] (head 
 
 ### What's next
 
-- Per-iteration analysis: with PP=1, windowing gives 1 window per PG (all ~30 iterations lumped). Need a different slicing mechanism for per-iteration resolution. Fine for POC but won't work for real workloads with intermittent stragglers.
-- Kernel vs host distinction: need larger model (meaningful `gpu_duration`) or different injection point to produce a genuine GPU-only signal without implicit sync propagation.
-- Threshold tuning: current 5ms threshold works for 50ms injection; need to validate with smaller delays and noisier environments.
+- [ ] **Investigate the structural false-positive HEADs on rank 5 and rank 7.** Across the 80-run sweep, these two ranks show Partial Match at every delay for both host and kernel injection — this is not noise, it's a repeatable pattern. The working hypothesis is that odd-numbered ranks, whose TP partners are even-numbered, generate an extra propagation path through the collective graph that surfaces a spurious HEAD alongside the true injected rank. Rank 1 @ 10 ms shows the same behavior at the small-delay end. Need to trace through the TP/DP group topology and the path-building logic to confirm the mechanism, then decide whether to fix it in attribution or upstream in graph construction. This is the concrete answer to the open "how will you reduce false positives" question.
+
+
+- [ ] **Move off the toy GPT-2 setup to a configuration where GPU-side injection produces a genuinely GPU-only signal.** On the current model, kernel injection via `torch.cuda._sleep` is swallowed by implicit CPU-GPU synchronization — `optim.step()` forces the next iteration's forward to wait on the GPU, so the CPU can't enqueue new collectives until the GPU catches up, and kernel injection ends up indistinguishable from host injection in `time_created_ns`.
+  - [ ] Increase batch size, try EP, turning on PP or otherwise build a "decent" model configuration where the GPU has enough work that a kernel-side delay doesn't immediately propagate to the host path. Without this, the host vs kernel distinction cannot be validated on real traces.
+
+- [ ] **Rewrite the windowing.**
+  - [ ] Current state with PP=1: the entire ~30-iteration run collapses into a single window per process group, so there is no per-iteration resolution.
+  - [ ] Even within that single window, the statistical comparison is degenerate: with only two samples per rank, "one larger, one smaller" carries no signal.
+  - [ ] The splitting logic is not splittable, need to rewrite.
+
+
+- [ ] **Remove the `default_pg` edge-case pin and find the underlying logic flaw.** Right now `default_pg` is hardcoded to the tail of the scheduling order to prevent it from becoming the head of every attribution chain and misattributing root cause to rank 0. This works but is a band-aid — it masks a real flaw in the attribution logic that happens to manifest through `default_pg` because of its early `global_idx`. The correct fix is to let `default_pg` be ordered by when it's actually scheduled (which may be late, and that's fine), then diagnose why the underlying DFS/ordering logic promotes it to head when it shouldn't.
+
+- [ ] **Measure the performance overhead of the detection path.** No overhead numbers have been collected yet. Use the torch APIs for in-iteration-loop timing to instrument the detector and report its cost in a real training step. This is prerequisite for any claim that the approach is deployable.

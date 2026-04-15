@@ -2,7 +2,7 @@
 
 ## Who I Am
 
-Wei Shen, PhD student at UW CSE. Advised by Ratul Mahajan and Arvind Krishnamurthy. Main codebase collaborator: Seonmyeong Bak (sbak) at NVIDIA. Mentoring undergrad Sarju.
+Wei Shen, PhD student at UW CSE. Advised by Ratul Mahajan and Arvind Krishnamurthy. Main codebase collaborator: Seonmyeong Bak (sbak) at NVIDIA. Mentoring undergrad Sarju, Kevin/ Peng.
 
 ## The Project: FR-Based Straggler Detection
 

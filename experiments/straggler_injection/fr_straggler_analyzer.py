@@ -502,123 +502,150 @@ def compute_window_stats(
 
 
 # ---------------------------------------------------------------------------
-# 4. Group PGs by temporal order
-#    Adapted from fr_attribution.py:group_pgs (lines 770-938)
+# 4. Graph traversal for cascade attribution
 #
-#    Builds a PG overlap graph and finds longest paths via DFS with
-#    monotonicity on global_idx (scheduling order). Head of each path
-#    is the wavefront PG — its straggler ranks are the root cause.
+#    Builds an overlap graph of straggler-flagged windows and finds HEADs
+#    (cascade roots) via dynamic programming on global_idx ordering.
 # ---------------------------------------------------------------------------
 
+WindowKey = Tuple[str, str, int]
 
-def group_pgs_temporal(
-    window_stats: Dict[Tuple[str, str, int], WindowStats],
-    collectives_to_order: Dict[Tuple[str, str, int], int],
-) -> Dict[int, List[Tuple[str, str, int]]]:
+
+@dataclass
+class CascadeResult:
+    """Result of cascade graph traversal."""
+    heads: Set[WindowKey]  # Windows with no straggler-predecessor
+    predecessors: Dict[WindowKey, List[WindowKey]]  # All predecessors per node
+    successors: Dict[WindowKey, List[WindowKey]]  # All successors per node
+    longest_path_length: Dict[WindowKey, int]  # For choosing chain in non-verbose mode
+    best_predecessor: Dict[WindowKey, Optional[WindowKey]]  # For longest chain reconstruction
+
+
+def build_cascade_graph(
+    window_stats: Dict[WindowKey, WindowStats],
+    collectives_to_order: Dict[WindowKey, int],
+) -> CascadeResult:
     """
-    Group straggler PG windows by finding longest paths in the overlap graph.
-    Adapted from fr_attribution.py:group_pgs.
+    Build overlap graph of straggler windows and identify HEADs via dynamic programming.
 
-    Nodes = PG windows with straggler ranks.
-    Edges = PG windows sharing any participating rank.
-    DFS with monotonicity: only traverse lower → higher scheduling order (global_idx).
-    Longest paths are kept; subset paths are removed.
-
-    Returns:
-        grouped_pgs: group_id -> list of window keys in path order (head first)
+    Nodes = windows with non-empty straggler_ranks.
+    Edges = windows sharing any participating rank, directed by global_idx (lower → higher).
+    HEADs = nodes with no straggler-predecessor (empty predecessors list).
     """
-    straggler_windows = {
-        k: ws for k, ws in window_stats.items() if ws.straggler_ranks
-    }
+    straggler_windows = {k: ws for k, ws in window_stats.items() if ws.straggler_ranks}
+
     if not straggler_windows:
-        return {}
+        return CascadeResult(
+            heads=set(),
+            predecessors={},
+            successors={},
+            longest_path_length={},
+            best_predecessor={},
+        )
 
-    # Map window keys → integer node IDs
+    # Map window keys → integer node IDs for efficient graph ops
     keys = sorted(straggler_windows.keys(), key=lambda k: collectives_to_order.get(k, 0))
     key_to_node = {k: i for i, k in enumerate(keys)}
     node_to_key = {i: k for k, i in key_to_node.items()}
 
-    # All participating ranks per window (edges based on full membership, not just stragglers)
+    # Participating ranks per window (full membership, not just stragglers)
     node_ranks: Dict[int, Set[str]] = {
         key_to_node[k]: set(ws.rank_stats.keys()) for k, ws in straggler_windows.items()
     }
 
-    # Build adjacency: PG windows sharing any rank get an edge
-    graph: Dict[int, Set[int]] = defaultdict(set)
+    # Build undirected adjacency (directionality applied at traversal time)
     node_ids = list(node_to_key.keys())
+    neighbors: Dict[int, Set[int]] = defaultdict(set)
     for n1 in node_ids:
-        graph[n1].add(n1)
         for n2 in node_ids:
             if n1 != n2 and node_ranks[n1] & node_ranks[n2]:
-                graph[n1].add(n2)
+                neighbors[n1].add(n2)
+                neighbors[n2].add(n1)
 
-    # Use BFS-like longest path for DAG (topological order by global_idx)
-    # Since we have monotonicity constraint, this is a DAG - use dynamic programming
-    node_order_map = {n: collectives_to_order.get(node_to_key[n], 0) for n in node_ids}
-    sorted_nodes = sorted(node_ids, key=lambda n: node_order_map[n])
+    # Dynamic programming: compute predecessors and longest path for each node
+    node_order = {n: collectives_to_order.get(node_to_key[n], 0) for n in node_ids}
+    sorted_nodes = sorted(node_ids, key=lambda n: node_order[n])
 
-    # dp[n] = (longest path length ending at n, predecessor)
-    dp: Dict[int, Tuple[int, Optional[int]]] = {n: (1, None) for n in node_ids}
+    # Track ALL predecessors (not just best one)
+    predecessors: Dict[int, List[int]] = {n: [] for n in node_ids}
+    # Track longest path length and best predecessor for chain reconstruction
+    longest_len: Dict[int, int] = {n: 1 for n in node_ids}
+    best_pred: Dict[int, Optional[int]] = {n: None for n in node_ids}
 
     for node in sorted_nodes:
-        node_order = node_order_map[node]
-        for nb in graph[node]:
-            if nb != node and node_order_map[nb] > node_order:
-                # nb comes after node in ordering
-                if dp[node][0] + 1 > dp[nb][0]:
-                    dp[nb] = (dp[node][0] + 1, node)
+        node_gidx = node_order[node]
+        for nb in neighbors[node]:
+            nb_gidx = node_order[nb]
+            if nb_gidx > node_gidx:
+                # node → nb is a valid directed edge (earlier → later)
+                predecessors[nb].append(node)
+                if longest_len[node] + 1 > longest_len[nb]:
+                    longest_len[nb] = longest_len[node] + 1
+                    best_pred[nb] = node
 
-    # Reconstruct paths starting from nodes with no incoming edges used
-    visited_global: Set[int] = set()
-    all_paths: List[List[int]] = []
+    # Build successor map by inverting predecessors
+    successors: Dict[int, List[int]] = {n: [] for n in node_ids}
+    for n, preds in predecessors.items():
+        for p in preds:
+            successors[p].append(n)
 
-    # Find path heads: nodes that aren't predecessors of longer paths
-    for start in sorted(node_ids, key=lambda n: len(node_ranks.get(n, set())), reverse=True):
-        if start in visited_global:
+    # HEADs = nodes with empty predecessors list
+    heads = {node_to_key[n] for n in node_ids if not predecessors[n]}
+
+    # Convert back to window keys
+    return CascadeResult(
+        heads=heads,
+        predecessors={node_to_key[n]: [node_to_key[p] for p in preds]
+                      for n, preds in predecessors.items()},
+        successors={node_to_key[n]: [node_to_key[s] for s in succs]
+                    for n, succs in successors.items()},
+        longest_path_length={node_to_key[n]: length for n, length in longest_len.items()},
+        best_predecessor={node_to_key[n]: (node_to_key[p] if p is not None else None)
+                          for n, p in best_pred.items()},
+    )
+
+
+def get_longest_chain_from_head(
+    head: WindowKey,
+    cascade: CascadeResult,
+) -> List[WindowKey]:
+    """Walk forward from HEAD following longest downstream path."""
+    chain = [head]
+    current = head
+    while cascade.successors.get(current):
+        # Pick successor with longest remaining path
+        succs = cascade.successors[current]
+        best = max(succs, key=lambda s: cascade.longest_path_length.get(s, 0))
+        chain.append(best)
+        current = best
+    return chain
+
+
+def get_full_dag_from_head(
+    head: WindowKey,
+    cascade: CascadeResult,
+) -> List[Tuple[WindowKey, int]]:
+    """
+    BFS from HEAD, returning (window_key, depth) pairs for tree rendering.
+    Each node appears once at its first-encountered depth.
+    """
+    result: List[Tuple[WindowKey, int]] = []
+    visited: Set[WindowKey] = set()
+    queue: List[Tuple[WindowKey, int]] = [(head, 0)]
+
+    while queue:
+        node, depth = queue.pop(0)
+        if node in visited:
             continue
+        visited.add(node)
+        result.append((node, depth))
+        for succ in sorted(cascade.successors.get(node, []),
+                           key=lambda s: cascade.longest_path_length.get(s, 0),
+                           reverse=True):
+            if succ not in visited:
+                queue.append((succ, depth + 1))
 
-        # Walk forward to find the end of this path
-        current = start
-        path = [current]
-        visited_global.add(current)
-
-        while True:
-            node_order = node_order_map[current]
-            # Find best next step
-            best_next = None
-            best_len = 0
-            for nb in graph[current]:
-                if nb != current and nb not in visited_global and node_order_map[nb] > node_order:
-                    if dp[nb][0] > best_len:
-                        best_len = dp[nb][0]
-                        best_next = nb
-            if best_next is None:
-                break
-            path.append(best_next)
-            visited_global.add(best_next)
-            current = best_next
-
-        all_paths.append(path)
-
-    # Remove subset paths
-    unique: List[List[int]] = []
-    for i, p1 in enumerate(all_paths):
-        s1 = set(p1)
-        is_sub = False
-        for j, p2 in enumerate(all_paths):
-            if i != j:
-                s2 = set(p2)
-                if s1 < s2:
-                    is_sub = True
-                    break
-                if s1 == s2 and p1 not in unique and p2 not in unique:
-                    unique.append(p1)
-                    is_sub = True
-                    break
-        if not is_sub:
-            unique.append(p1)
-
-    return {gid: [node_to_key[n] for n in path] for gid, path in enumerate(unique)}
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -641,12 +668,13 @@ def load_ground_truth(trace_dir: str) -> Optional[dict]:
 
 
 def print_summary(
-    all_window_stats: Dict[Tuple[str, str, int], WindowStats],
-    collectives_to_order: Dict[Tuple[str, str, int], int],
-    grouped_pgs: Dict[int, List[Tuple[str, str, int]]],
+    all_window_stats: Dict[WindowKey, WindowStats],
+    collectives_to_order: Dict[WindowKey, int],
+    cascade: CascadeResult,
     pg_filter: Optional[str] = None,
+    verbose_cascade: bool = False,
 ):
-    """Print summary table of windows with stragglers, plus grouped PG paths."""
+    """Print summary table of windows with stragglers, plus cascade chains from HEADs."""
     logger.info("\n=== Straggler Analysis Summary ===\n")
 
     # Header
@@ -684,25 +712,42 @@ def print_summary(
 
     logger.info(f"\nWindows with stragglers: {straggler_window_count}/{total_windows}")
 
-    # Grouped PG paths (temporal order)
-    if grouped_pgs:
-        logger.info("\n=== Grouped PG Paths (temporal order) ===\n")
-        for group_id, path_keys in grouped_pgs.items():
-            head_key = path_keys[0]
-            head_ws = all_window_stats[head_key]
+    # Cascade chains from HEADs
+    if cascade.heads:
+        logger.info("\n=== Cascade Chains (from HEADs) ===\n")
+        sorted_heads = sorted(cascade.heads, key=lambda k: collectives_to_order.get(k, 0))
+
+        for head_idx, head in enumerate(sorted_heads):
+            head_ws = all_window_stats[head]
+            head_gidx = collectives_to_order.get(head, -1)
             head_ranks = ",".join(sorted(head_ws.straggler_ranks, key=int))
-            logger.info(f"  Path {group_id} (head straggler rank(s): {head_ranks}):")
-            for step, key in enumerate(path_keys):
-                megatron_id, pg_desc, window_idx = key
-                ws = all_window_stats[key]
-                gidx = collectives_to_order.get(key, -1)
-                straggler_str = ",".join(sorted(ws.straggler_ranks, key=int))
-                marker = " <-- HEAD" if step == 0 else ""
-                logger.info(
-                    f"    [{gidx:>3}] {pg_desc:<40} win={window_idx} straggler={straggler_str}{marker}"
-                )
+            megatron_id, pg_desc, window_idx = head
+
+            logger.info(f"  HEAD {head_idx}: [{head_gidx}] {pg_desc} win={window_idx} (straggler rank(s): {head_ranks})")
+
+            if verbose_cascade:
+                # Full DAG rendering with indentation
+                dag = get_full_dag_from_head(head, cascade)
+                for node, depth in dag[1:]:  # Skip head (already printed)
+                    ws = all_window_stats[node]
+                    gidx = collectives_to_order.get(node, -1)
+                    _, node_pg_desc, node_win_idx = node
+                    straggler_str = ",".join(sorted(ws.straggler_ranks, key=int))
+                    indent = "    " + "  " * depth
+                    logger.info(f"{indent}→ [{gidx}] {node_pg_desc} win={node_win_idx} straggler={straggler_str}")
+            else:
+                # Longest chain only
+                chain = get_longest_chain_from_head(head, cascade)
+                for node in chain[1:]:  # Skip head (already printed)
+                    ws = all_window_stats[node]
+                    gidx = collectives_to_order.get(node, -1)
+                    _, node_pg_desc, node_win_idx = node
+                    straggler_str = ",".join(sorted(ws.straggler_ranks, key=int))
+                    logger.info(f"      → [{gidx}] {node_pg_desc} win={node_win_idx} straggler={straggler_str}")
+
+            logger.info("")  # Blank line between HEADs
     else:
-        logger.info("\nNo grouped PG paths found.")
+        logger.info("\nNo HEADs found (no straggler windows).")
 
 
 def print_detailed(
@@ -816,30 +861,161 @@ def analyze(trace_dir: str, verbose: bool = False, pg_filter: Optional[str] = No
     straggler_count = sum(1 for ws in all_window_stats.values() if ws.straggler_ranks)
     logger.info(f"  {len(all_window_stats)} windows analyzed, {straggler_count} with stragglers")
 
-    # 4. Group PGs by temporal order (graph traversal for root cause)
-    logger.info("\nGrouping PGs by temporal order (graph traversal)...")
-    grouped_pgs = group_pgs_temporal(all_window_stats, collectives_to_order)
-    logger.info(f"  {len(grouped_pgs)} causal paths found")
+    # 4. Build cascade graph and find HEADs
+    logger.info("\nBuilding cascade graph...")
+    cascade = build_cascade_graph(all_window_stats, collectives_to_order)
+    logger.info(f"  {len(cascade.heads)} HEADs found")
 
     # 5. Output
     if verbose:
         print_detailed(all_window_stats, collectives_to_order, pg_filter)
 
-    print_summary(all_window_stats, collectives_to_order, grouped_pgs, pg_filter)
+    print_summary(all_window_stats, collectives_to_order, cascade, pg_filter, verbose)
 
     # 6. Ground truth
     ground_truth = load_ground_truth(trace_dir)
     print_ground_truth_comparison(all_window_stats, ground_truth)
 
 
+def test_synthetic_abc():
+    """
+    Test the A/B/C synthetic case from the bug description.
+
+    Nodes: A (gidx=0, 2 ranks), B (gidx=1, 8 ranks), C (gidx=2, 2 ranks)
+    Edges: A↔B, B↔C (B shares ranks with both)
+    Expected: HEAD = {A}, chain = A → B → C
+    """
+    print("\n=== Synthetic A/B/C Test ===\n")
+
+    # Create mock WindowStats
+    key_a: WindowKey = ("mg_a", "PG_A", 0)
+    key_b: WindowKey = ("mg_b", "PG_B", 0)
+    key_c: WindowKey = ("mg_c", "PG_C", 0)
+
+    # A has ranks {0, 1}, B has ranks {0,1,2,3,4,5,6,7}, C has ranks {6, 7}
+    # A↔B share {0,1}, B↔C share {6,7}, A and C don't share
+    window_stats: Dict[WindowKey, WindowStats] = {
+        key_a: WindowStats(
+            key=key_a,
+            rank_stats={"0": None, "1": None},  # type: ignore
+            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
+            straggler_ranks={"0"}, straggler_signal="test",
+        ),
+        key_b: WindowStats(
+            key=key_b,
+            rank_stats={str(i): None for i in range(8)},  # type: ignore
+            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
+            straggler_ranks={"3"}, straggler_signal="test",
+        ),
+        key_c: WindowStats(
+            key=key_c,
+            rank_stats={"6": None, "7": None},  # type: ignore
+            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
+            straggler_ranks={"7"}, straggler_signal="test",
+        ),
+    }
+
+    collectives_to_order: Dict[WindowKey, int] = {
+        key_a: 0,
+        key_b: 1,
+        key_c: 2,
+    }
+
+    cascade = build_cascade_graph(window_stats, collectives_to_order)
+
+    print(f"HEADs: {cascade.heads}")
+    print(f"Expected: {{('mg_a', 'PG_A', 0)}}")
+    assert cascade.heads == {key_a}, f"Expected HEAD={{A}}, got {cascade.heads}"
+
+    print(f"\nPredecessors[A]: {cascade.predecessors[key_a]}")
+    print(f"Predecessors[B]: {cascade.predecessors[key_b]}")
+    print(f"Predecessors[C]: {cascade.predecessors[key_c]}")
+    assert cascade.predecessors[key_a] == [], f"A should have no predecessors"
+    assert cascade.predecessors[key_b] == [key_a], f"B should have A as predecessor"
+    assert cascade.predecessors[key_c] == [key_b], f"C should have B as predecessor"
+
+    chain = get_longest_chain_from_head(key_a, cascade)
+    print(f"\nLongest chain from A: {chain}")
+    assert chain == [key_a, key_b, key_c], f"Expected [A,B,C], got {chain}"
+
+    print("\n✓ Synthetic A/B/C test PASSED\n")
+
+
+def test_synthetic_branching():
+    """
+    Test a branching case: A → B, A → C (A has two successors).
+
+    Nodes: A (gidx=0), B (gidx=1), C (gidx=2)
+    A shares ranks with both B and C. B and C don't share.
+    Expected: HEAD = {A}, full DAG shows both branches.
+    """
+    print("\n=== Synthetic Branching Test ===\n")
+
+    key_a: WindowKey = ("mg_a", "PG_A", 0)
+    key_b: WindowKey = ("mg_b", "PG_B", 0)
+    key_c: WindowKey = ("mg_c", "PG_C", 0)
+
+    # A has ranks {0,1,2,3}, B has {0,1}, C has {2,3}
+    # A↔B share {0,1}, A↔C share {2,3}, B and C don't share
+    window_stats: Dict[WindowKey, WindowStats] = {
+        key_a: WindowStats(
+            key=key_a,
+            rank_stats={"0": None, "1": None, "2": None, "3": None},  # type: ignore
+            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
+            straggler_ranks={"0"}, straggler_signal="test",
+        ),
+        key_b: WindowStats(
+            key=key_b,
+            rank_stats={"0": None, "1": None},  # type: ignore
+            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
+            straggler_ranks={"1"}, straggler_signal="test",
+        ),
+        key_c: WindowStats(
+            key=key_c,
+            rank_stats={"2": None, "3": None},  # type: ignore
+            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
+            straggler_ranks={"3"}, straggler_signal="test",
+        ),
+    }
+
+    collectives_to_order: Dict[WindowKey, int] = {
+        key_a: 0,
+        key_b: 1,
+        key_c: 2,
+    }
+
+    cascade = build_cascade_graph(window_stats, collectives_to_order)
+
+    print(f"HEADs: {cascade.heads}")
+    assert cascade.heads == {key_a}, f"Expected HEAD={{A}}, got {cascade.heads}"
+
+    print(f"Successors[A]: {cascade.successors[key_a]}")
+    assert set(cascade.successors[key_a]) == {key_b, key_c}, f"A should have B and C as successors"
+
+    dag = get_full_dag_from_head(key_a, cascade)
+    print(f"Full DAG from A: {dag}")
+    assert len(dag) == 3, f"DAG should have 3 nodes"
+
+    print("\n✓ Synthetic branching test PASSED\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description="FR Straggler Analyzer")
-    parser.add_argument("trace_dir", help="Path to trace directory containing _dump_*.json files")
+    parser.add_argument("trace_dir", nargs="?", help="Path to trace directory containing _dump_*.json files")
     parser.add_argument("-v", "--verbose", action="store_true", help="Detailed per-rank per-window output")
     parser.add_argument("--pg", default=None, help="Filter output to PGs matching this substring")
     parser.add_argument("--threshold-ms", type=float, default=5.0,
                         help="Straggler detection threshold in ms (default: 5.0)")
+    parser.add_argument("--test", action="store_true", help="Run synthetic tests")
     args = parser.parse_args()
+
+    if args.test:
+        test_synthetic_abc()
+        test_synthetic_branching()
+        return
+
+    if not args.trace_dir:
+        parser.error("trace_dir is required unless --test is specified")
 
     # Auto-save output to {trace_dir}/analysis.log alongside run_config.log
     log_path = os.path.join(args.trace_dir, "analysis.log")

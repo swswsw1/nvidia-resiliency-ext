@@ -34,7 +34,15 @@ The fundamental question is: **which ranks were actually doing the same thing at
 
 **Why you can't just look at a single collective in isolation**: in real traces, different ranks have other PGs' collectives and p2p ops interleaved before and after. Single-record comparison doesn't tell you "which wave of which PG this belongs to." The window gives you the bucket within which cross-rank comparison is meaningful.
 
-  
+**Windowing flattens the seq_id layer.** A window groups all consecutive entries of the same PG until a different PG appears. If a rank's trace shows `T T T T D T T T T D`, the first four T's form one window, the next four T's form another — the D in between marks the boundary. This collapses many seq_ids into one window_id.
+
+**Why this is the right granularity for straggler cascade** (pending empirical validation):
+
+The core insight: cascade boundaries exist where PG membership changes. Within a window, all member ranks execute the same collectives together — if rank X is late to the first collective, it's late to all of them. Cascade within a window is instant and complete. But when PG switches (T → D), different ranks become involved, and the straggler can infect a new set. The cascade arrows point *between* windows.
+
+Going finer (per-seq_id) adds noise and repetitive information — the same delay appears N times. Going one level above (grouping multiple windows of the same PG type) skips over the intermediate PGs when PG membership change, which is where cascade actually propagates.
+
+**Windowing as 2D compaction.** The input is a matrix: rows = ranks, columns = FR entries (already time-ordered by `time_created_ns` within each rank). Pass 1 compacts each row: consecutive same-PG entries merge into one window, and singleton entries also become their own window — every entry gets a window_id. Pass 2 compacts across columns: order windows by timestamp, assign global_idx. The output is a 2D-compacted total ordering of windows that enables graph traversal for attribution and straggler analysis.
 
   
 
@@ -474,3 +482,15 @@ Why TP does three kinds of collectives: `_all_gather_base` (before ColumnParalle
   
 
 | lock_gil_2nd | {10, 15} | fault_injection.log |
+
+## 14. Why `time_discovered_*` Never Works for Kernel Straggler Detection
+
+With `TORCH_NCCL_ENABLE_TIMING=1`, we get both the `time_discovered_*` polling timestamps AND `duration_ms`. These are coupled through the start event (`ncclStartEvent_`) — without the start event, neither exists; with it, you get both. There's no flag to get one without the other.
+
+Initially we computed `discovered_completed - discovered_started` expecting it to reflect GPU kernel duration. Across 1.2M entries from our 240+ straggler injection traces, operations taking 6 seconds have the same ~200ns discovered diff as operations taking 10µs. This measures how fast the CPU can call `cudaEventQuery()` twice — the watchdog polls in a loop, and discovered timestamps record when polling *noticed* the event, not when the GPU event fired. A 2-second kernel finishing 1ns before one poll and 1ns after the next shows a 2ns discovered diff.
+
+So what ARE discovered timestamps for? Timeout detection — compare `now - discovered_started > threshold` *before* completion. Wall-clock correlation across ranks. In-flight state tracking. The watchdog's original purpose is hang detection, not performance timing.
+
+**For straggler detection**: `duration_ms` (via `cudaEventElapsedTime(start, end)`) is the accurate kernel timing. Host straggler → late `time_created_ns`. Kernel straggler → shortest `duration_ms`.
+
+**Sources**: [PR #141737](https://github.com/pytorch/pytorch/pull/141737), `FlightRecorderDetail.hpp` (`update_state()` for polling), `ProcessGroupNCCL.cpp` (`getDuration()` for cudaEventElapsedTime).

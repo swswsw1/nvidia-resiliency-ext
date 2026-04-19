@@ -179,8 +179,22 @@ def group_collectives_by_windows(
             break
 
         # Wavefront: PG type most ranks are at
+        # When tied, pick PG with earliest min(time_created_ns)
         pg_counter = Counter(current_pg_types.values())
-        current_pg, _ = pg_counter.most_common(1)[0]
+        max_count = pg_counter.most_common(1)[0][1]
+        tied_pgs = [pg for pg, cnt in pg_counter.items() if cnt == max_count]
+
+        if len(tied_pgs) == 1:
+            current_pg = tied_pgs[0]
+        else:
+            # Tie-break by earliest min(time_created_ns) among pointing entries
+            def min_timestamp(pg: Tuple[str, str]) -> int:
+                return min(
+                    collectives_by_file[rid][rank_indices[rid]].time_created_ns
+                    for rid, pg_key in current_pg_types.items()
+                    if pg_key == pg
+                )
+            current_pg = min(tied_pgs, key=min_timestamp)
 
         window_idx = pg_window_counter[current_pg]
         pg_window_key = (current_pg, window_idx)

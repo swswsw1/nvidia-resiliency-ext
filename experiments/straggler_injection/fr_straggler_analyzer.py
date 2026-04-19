@@ -142,108 +142,212 @@ def load_trace_dir(trace_dir: str) -> Tuple[Dict[str, List[Collective]], Dict[st
 
 
 # ---------------------------------------------------------------------------
-# 2. Windowing — adapted from fr_attribution.py:group_collectives_by_windows
+# 2. Windowing — two-pass architecture
+#
+# Pass 1 (row compaction): Per-rank, compress consecutive same-megatron_id
+#         entries into windows. P2P entries are singletons (no merging).
+# Pass 2 (column ordering): Group windows by (megatron_id, window_id),
+#         sort by min(time_created_ns), assign global_idx.
+#
+# No majority voting. Timestamp-only ordering.
 # ---------------------------------------------------------------------------
+
+@dataclass
+class Window:
+    """A contiguous run of same-PG entries from one rank."""
+    megatron_id: str
+    pg_desc: str
+    window_id: int  # occurrence count for collectives, p2p_seq_id for P2P
+    entries: List[Collective]
+    is_p2p: bool
+    rank_id: str
+
+    @property
+    def min_time_created_ns(self) -> int:
+        return min(e.time_created_ns for e in self.entries)
+
+    @property
+    def participating_ranks(self) -> Set[str]:
+        """For collectives, this is set after cross-rank grouping. For P2P, derived from entries."""
+        return set(e.file_id for e in self.entries)
+
+
+def _parse_p2p_participants(profiling_name: str, pg_config: Optional[dict]) -> Set[int]:
+    """
+    Parse P2P participants from profiling_name like "send 0->3" or "recv 2<-3".
+    Returns global rank IDs if pg_config is available, otherwise local indices.
+    """
+    import re
+    # Match patterns like "send 0->3" or "recv 2<-3"
+    match = re.search(r'(\d+)\s*[<>-]+\s*(\d+)', profiling_name)
+    if not match:
+        return set()
+    local_src, local_dst = int(match.group(1)), int(match.group(2))
+    # For now, return the local indices. In practice, we'd map through pg_config.
+    # The Window participating_ranks will be populated after cross-rank grouping.
+    return {local_src, local_dst}
+
+
+def _assign_windows_per_rank(
+    collectives_by_file: Dict[str, List[Collective]],
+) -> Dict[str, List[Window]]:
+    """
+    Pass 1: Per-rank window assignment (row compaction).
+
+    For each rank:
+    - Walk entries in order (already time-sorted by time_created_ns)
+    - Collectives: merge consecutive same-megatron_id into windows.
+      window_id = occurrence count of this megatron_id as a distinct run.
+    - P2P: each entry is its own singleton window.
+      window_id = p2p_seq_id (globally unique per operation).
+
+    Returns:
+        Dict[rank_id, List[Window]] — windows per rank, in chronological order.
+    """
+    windows_by_rank: Dict[str, List[Window]] = {}
+
+    for rank_id, entries in collectives_by_file.items():
+        windows: List[Window] = []
+        pg_occurrence_count: Dict[str, int] = defaultdict(int)  # megatron_id -> count
+
+        i = 0
+        while i < len(entries):
+            entry = entries[i]
+            megatron_id = entry.process_group[0]
+            pg_desc = entry.process_group[1]
+            is_p2p = entry.p2p_seq_id > 0
+
+            if is_p2p:
+                # P2P: singleton window, window_id = p2p_seq_id
+                windows.append(Window(
+                    megatron_id=megatron_id,
+                    pg_desc=pg_desc,
+                    window_id=entry.p2p_seq_id,
+                    entries=[entry],
+                    is_p2p=True,
+                    rank_id=rank_id,
+                ))
+                i += 1
+            else:
+                # Collective: merge consecutive same-megatron_id entries
+                window_entries = [entry]
+                j = i + 1
+                while j < len(entries):
+                    next_entry = entries[j]
+                    next_megatron_id = next_entry.process_group[0]
+                    next_is_p2p = next_entry.p2p_seq_id > 0
+                    if next_is_p2p or next_megatron_id != megatron_id:
+                        break
+                    window_entries.append(next_entry)
+                    j += 1
+
+                # window_id = occurrence count of this megatron_id
+                window_id = pg_occurrence_count[megatron_id]
+                pg_occurrence_count[megatron_id] += 1
+
+                windows.append(Window(
+                    megatron_id=megatron_id,
+                    pg_desc=pg_desc,
+                    window_id=window_id,
+                    entries=window_entries,
+                    is_p2p=False,
+                    rank_id=rank_id,
+                ))
+                i = j
+
+        windows_by_rank[rank_id] = windows
+
+    return windows_by_rank
+
+
+def _order_windows_globally(
+    windows_by_rank: Dict[str, List[Window]],
+) -> Tuple[Dict[Tuple[str, str, int], List[Collective]], Dict[Tuple[str, str, int], int]]:
+    """
+    Pass 2: Cross-rank window ordering (column compaction).
+
+    1. Collect all windows from all ranks.
+    2. Group by (megatron_id, window_id) — same key for collectives and P2P.
+    3. Sort groups by min(time_created_ns).
+    4. Assign global_idx = position in sorted order.
+
+    Returns:
+        grouped_windows: (megatron_id, pg_desc, window_id) -> List[Collective]
+        collectives_to_order: (megatron_id, pg_desc, window_id) -> global_idx
+    """
+    # Step 1: Collect all windows and group by (megatron_id, window_id)
+    # Use (megatron_id, window_id) as grouping key; pg_desc is carried for output
+    from collections import defaultdict
+
+    GroupKey = Tuple[str, int]  # (megatron_id, window_id)
+    groups: Dict[GroupKey, List[Window]] = defaultdict(list)
+
+    for rank_id, windows in windows_by_rank.items():
+        for w in windows:
+            key = (w.megatron_id, w.window_id)
+            groups[key].append(w)
+
+    # Step 2: For each group, compute min timestamp and pg_desc
+    group_info: List[Tuple[GroupKey, int, str, List[Window]]] = []
+    for key, window_list in groups.items():
+        min_ts = min(w.min_time_created_ns for w in window_list)
+        # pg_desc should be consistent across windows in the group
+        pg_desc = window_list[0].pg_desc
+        group_info.append((key, min_ts, pg_desc, window_list))
+
+    # Step 3: Sort by min timestamp
+    group_info.sort(key=lambda x: x[1])
+
+    # Step 4: Build output structures
+    grouped_windows: Dict[Tuple[str, str, int], List[Collective]] = {}
+    collectives_to_order: Dict[Tuple[str, str, int], int] = {}
+
+    for global_idx, (key, min_ts, pg_desc, window_list) in enumerate(group_info):
+        megatron_id, window_id = key
+        output_key = (megatron_id, pg_desc, window_id)
+
+        # Flatten entries from all windows in this group
+        all_entries: List[Collective] = []
+        for w in window_list:
+            all_entries.extend(w.entries)
+
+        grouped_windows[output_key] = all_entries
+        collectives_to_order[output_key] = global_idx
+
+    return grouped_windows, collectives_to_order
+
 
 def group_collectives_by_windows(
     collectives_by_file: Dict[str, List[Collective]],
-) -> Dict[Tuple[str, str, int], List[Collective]]:
+) -> Tuple[Dict[Tuple[str, str, int], List[Collective]], Dict[Tuple[str, str, int], int]]:
     """
-    Group collectives into windows by PG and temporal phase.
+    Two-pass windowing: group collectives by PG and temporal phase.
 
-    Uses wavefront-based replay: pick the PG that most ranks currently point at,
-    consume all matching entries, split windows when ranks repeat or new ranks appear.
+    Pass 1: Per-rank row compaction (consecutive same-PG → window)
+    Pass 2: Cross-rank column ordering (by timestamp → global_idx)
 
     Returns:
-        dict mapping (megatron_id, pg_desc, window_idx) -> list of Collective
+        grouped_windows: (megatron_id, pg_desc, window_id) -> List[Collective]
+        collectives_to_order: (megatron_id, pg_desc, window_id) -> global_idx
     """
-    rank_indices = {rank_id: 0 for rank_id in collectives_by_file.keys()}
-    pg_window_counter: Dict[Tuple[str, str], int] = defaultdict(int)
-    pg_window_participants: Dict[Tuple, Set[str]] = defaultdict(set)
-    pgs_with_active_ranks_last_iter: Set[Tuple[str, str]] = set()
-    matched_groups: Dict[Tuple[str, str, int], List[Collective]] = defaultdict(list)
+    # Pass 1: Per-rank window assignment
+    windows_by_rank = _assign_windows_per_rank(collectives_by_file)
 
-    while any(
-        rank_indices[rid] < len(collectives_by_file[rid])
-        for rid in rank_indices
-    ):
-        # Current PG type for each rank that hasn't finished
-        current_pg_types = {}
-        for rank_id, idx in rank_indices.items():
-            if idx < len(collectives_by_file[rank_id]):
-                c = collectives_by_file[rank_id][idx]
-                pg_key = (c.process_group[0], c.process_group[1])
-                current_pg_types[rank_id] = pg_key
+    # Log pass 1 results
+    total_windows = sum(len(ws) for ws in windows_by_rank.values())
+    logger.info(f"\nPass 1 (row compaction): {total_windows} windows across {len(windows_by_rank)} ranks")
+    for rank_id in sorted(windows_by_rank.keys(), key=int):
+        windows = windows_by_rank[rank_id]
+        collective_wins = sum(1 for w in windows if not w.is_p2p)
+        p2p_wins = sum(1 for w in windows if w.is_p2p)
+        logger.debug(f"  rank {rank_id}: {len(windows)} windows ({collective_wins} collective, {p2p_wins} p2p)")
 
-        if not current_pg_types:
-            break
+    # Pass 2: Cross-rank ordering
+    grouped_windows, collectives_to_order = _order_windows_globally(windows_by_rank)
 
-        # Wavefront: PG type most ranks are at
-        # When tied, pick PG with earliest min(time_created_ns)
-        pg_counter = Counter(current_pg_types.values())
-        max_count = pg_counter.most_common(1)[0][1]
-        tied_pgs = [pg for pg, cnt in pg_counter.items() if cnt == max_count]
+    logger.info(f"Pass 2 (column ordering): {len(grouped_windows)} unique window groups")
 
-        if len(tied_pgs) == 1:
-            current_pg = tied_pgs[0]
-        else:
-            # Tie-break by earliest min(time_created_ns) among pointing entries
-            def min_timestamp(pg: Tuple[str, str]) -> int:
-                return min(
-                    collectives_by_file[rid][rank_indices[rid]].time_created_ns
-                    for rid, pg_key in current_pg_types.items()
-                    if pg_key == pg
-                )
-            current_pg = min(tied_pgs, key=min_timestamp)
-
-        window_idx = pg_window_counter[current_pg]
-        pg_window_key = (current_pg, window_idx)
-
-        # Check if we need a new window
-        ranks_with_current_pg = set(
-            rid for rid, pg in current_pg_types.items() if pg == current_pg
-        )
-        already_participated = pg_window_participants[pg_window_key] & ranks_with_current_pg
-        previous_participants = pg_window_participants[pg_window_key]
-        has_previous_participants = len(previous_participants) > 0
-        has_significant_new_ranks = len(ranks_with_current_pg - previous_participants) >= 2
-
-        should_create_new_window = False
-        if current_pg not in pgs_with_active_ranks_last_iter:
-            if already_participated or (has_previous_participants and has_significant_new_ranks):
-                should_create_new_window = True
-
-        if should_create_new_window:
-            pg_window_counter[current_pg] += 1
-            window_idx = pg_window_counter[current_pg]
-            pg_window_key = (current_pg, window_idx)
-
-        key_with_window = (current_pg[0], current_pg[1], window_idx)
-
-        # Consume all matching entries for this PG
-        has_matches = True
-        while has_matches:
-            has_matches = False
-            for rank_id in list(rank_indices.keys()):
-                idx = rank_indices[rank_id]
-                if idx < len(collectives_by_file[rank_id]):
-                    c = collectives_by_file[rank_id][idx]
-                    pg_key = (c.process_group[0], c.process_group[1])
-                    if pg_key == current_pg:
-                        matched_groups[key_with_window].append(c)
-                        rank_indices[rank_id] += 1
-                        has_matches = True
-                        pg_window_participants[pg_window_key].add(rank_id)
-
-        # Update active PGs for next iteration
-        pgs_with_active_ranks = set()
-        for rank_id, idx in rank_indices.items():
-            if idx < len(collectives_by_file[rank_id]):
-                c = collectives_by_file[rank_id][idx]
-                pgs_with_active_ranks.add((c.process_group[0], c.process_group[1]))
-        pgs_with_active_ranks_last_iter = pgs_with_active_ranks
-
-    return matched_groups
+    return grouped_windows, collectives_to_order
 
 
 # ---------------------------------------------------------------------------
@@ -448,41 +552,53 @@ def group_pgs_temporal(
             if n1 != n2 and node_ranks[n1] & node_ranks[n2]:
                 graph[n1].add(n2)
 
-    # DFS with monotonicity on global_idx to find longest paths
-    def dfs(node: int, path: List[int], visited: Set[int]) -> List[List[int]]:
-        if node in visited:
-            return [path]
-        visited = visited | {node}
-        path = path + [node]
-        node_order = collectives_to_order.get(node_to_key[node], 0)
+    # Use BFS-like longest path for DAG (topological order by global_idx)
+    # Since we have monotonicity constraint, this is a DAG - use dynamic programming
+    node_order_map = {n: collectives_to_order.get(node_to_key[n], 0) for n in node_ids}
+    sorted_nodes = sorted(node_ids, key=lambda n: node_order_map[n])
 
-        forward = [
-            nb for nb in graph[node]
-            if nb not in visited
-            and collectives_to_order.get(node_to_key[nb], 0) >= node_order
-        ]
-        if not forward:
-            return [path]
+    # dp[n] = (longest path length ending at n, predecessor)
+    dp: Dict[int, Tuple[int, Optional[int]]] = {n: (1, None) for n in node_ids}
 
-        results = []
-        for nb in forward:
-            results.extend(dfs(nb, path, visited))
-        return results
+    for node in sorted_nodes:
+        node_order = node_order_map[node]
+        for nb in graph[node]:
+            if nb != node and node_order_map[nb] > node_order:
+                # nb comes after node in ordering
+                if dp[node][0] + 1 > dp[nb][0]:
+                    dp[nb] = (dp[node][0] + 1, node)
 
-    # Start from each unvisited node (largest PGs first, matching attribution)
+    # Reconstruct paths starting from nodes with no incoming edges used
     visited_global: Set[int] = set()
     all_paths: List[List[int]] = []
+
+    # Find path heads: nodes that aren't predecessors of longer paths
     for start in sorted(node_ids, key=lambda n: len(node_ranks.get(n, set())), reverse=True):
         if start in visited_global:
             continue
-        seen: Set[Tuple[int, ...]] = set()
-        for path in dfs(start, [], set()):
-            pt = tuple(path)
-            if pt not in seen:
-                seen.add(pt)
-                for n in path:
-                    visited_global.add(n)
-                all_paths.append(path)
+
+        # Walk forward to find the end of this path
+        current = start
+        path = [current]
+        visited_global.add(current)
+
+        while True:
+            node_order = node_order_map[current]
+            # Find best next step
+            best_next = None
+            best_len = 0
+            for nb in graph[current]:
+                if nb != current and nb not in visited_global and node_order_map[nb] > node_order:
+                    if dp[nb][0] > best_len:
+                        best_len = dp[nb][0]
+                        best_next = nb
+            if best_next is None:
+                break
+            path.append(best_next)
+            visited_global.add(best_next)
+            current = best_next
+
+        all_paths.append(path)
 
     # Remove subset paths
     unique: List[List[int]] = []
@@ -682,28 +798,28 @@ def analyze(trace_dir: str, verbose: bool = False, pg_filter: Optional[str] = No
     # 1. Load
     collectives_by_file, pg_configs, pg_status = load_trace_dir(trace_dir)
 
-    # 2. Window
-    windows = group_collectives_by_windows(collectives_by_file)
-    logger.info(f"\nWindowing produced {len(windows)} windows:")
-    for key in sorted(windows.keys()):
+    # 2. Window (two-pass: row compaction → column ordering)
+    # Returns both grouped windows and their global ordering (no default_pg hack)
+    windows, collectives_to_order = group_collectives_by_windows(collectives_by_file)
+    logger.info(f"\nWindowing produced {len(windows)} unique window groups:")
+    for key in sorted(windows.keys(), key=lambda k: collectives_to_order.get(k, 0)):
         megatron_id, pg_desc, window_idx = key
         ranks = set(c.file_id for c in windows[key])
-        logger.info(f"  ({megatron_id}, {pg_desc}, win={window_idx}): {len(windows[key])} entries, ranks={sorted(ranks, key=int)}")
-
-    # Build scheduling order (global_idx for each window key).
-    # default_pg is pinned to the end so it's always a tail in DFS,
-    # never a root-cause head (matches old attribution's DEFAULT_PG_ORDER).
-    regular_keys = [k for k in windows if k[1] != "default_pg"]
-    default_keys = [k for k in windows if k[1] == "default_pg"]
-    collectives_to_order = {k: i for i, k in enumerate(regular_keys + default_keys)}
+        gidx = collectives_to_order.get(key, -1)
+        logger.info(f"  [gidx={gidx}] ({megatron_id}, {pg_desc}, win={window_idx}): {len(windows[key])} entries, ranks={sorted(ranks, key=int)}")
 
     # 3. Per-window stats + straggler identification
+    logger.info("\nComputing per-window statistics...")
     all_window_stats: Dict[Tuple[str, str, int], WindowStats] = {}
     for key, colls in windows.items():
         all_window_stats[key] = compute_window_stats(key, colls, threshold_ms=threshold_ms)
+    straggler_count = sum(1 for ws in all_window_stats.values() if ws.straggler_ranks)
+    logger.info(f"  {len(all_window_stats)} windows analyzed, {straggler_count} with stragglers")
 
     # 4. Group PGs by temporal order (graph traversal for root cause)
+    logger.info("\nGrouping PGs by temporal order (graph traversal)...")
     grouped_pgs = group_pgs_temporal(all_window_stats, collectives_to_order)
+    logger.info(f"  {len(grouped_pgs)} causal paths found")
 
     # 5. Output
     if verbose:

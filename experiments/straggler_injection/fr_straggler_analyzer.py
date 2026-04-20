@@ -348,8 +348,8 @@ def group_collectives_by_windows(
     # Filter out default_pg: it includes all ranks, so any timing variance makes it
     # a false-positive HEAD that sweeps everything downstream into one cascade.
     # Stragglers don't originate in default_pg — it's just init coordination.
-    grouped_windows = {k: v for k, v in grouped_windows.items() if k[1] != "default_pg"}
-    collectives_to_order = {k: v for k, v in collectives_to_order.items() if k[1] != "default_pg"}
+    # grouped_windows = {k: v for k, v in grouped_windows.items() if k[1] != "default_pg"}
+    # collectives_to_order = {k: v for k, v in collectives_to_order.items() if k[1] != "default_pg"}
 
     logger.info(f"Pass 2 (column ordering): {len(grouped_windows)} unique window groups")
 
@@ -538,11 +538,11 @@ def build_cascade_graph(
     Edges = windows sharing any participating rank, directed by global_idx (lower → higher).
     HEADs = nodes with no straggler-predecessor (empty predecessors list).
     """
-    # Filter out default_pg: it includes all ranks and happens at init,
-    # so it would become HEAD and connect to everything, masking real root causes.
+    # Filter out init windows (win≤1): rank 0 has startup coordination overhead
+    # that creates false straggler signals. Real stragglers appear in steady-state.
     straggler_windows = {
         k: ws for k, ws in window_stats.items()
-        if ws.straggler_ranks and k[1] != "default_pg"
+        if ws.straggler_ranks and k[2] >= 2  # k[2] is window_idx
     }
 
     if not straggler_windows:

@@ -345,6 +345,12 @@ def group_collectives_by_windows(
     # Pass 2: Cross-rank ordering
     grouped_windows, collectives_to_order = _order_windows_globally(windows_by_rank)
 
+    # Filter out default_pg: it includes all ranks, so any timing variance makes it
+    # a false-positive HEAD that sweeps everything downstream into one cascade.
+    # Stragglers don't originate in default_pg — it's just init coordination.
+    grouped_windows = {k: v for k, v in grouped_windows.items() if k[1] != "default_pg"}
+    collectives_to_order = {k: v for k, v in collectives_to_order.items() if k[1] != "default_pg"}
+
     logger.info(f"Pass 2 (column ordering): {len(grouped_windows)} unique window groups")
 
     return grouped_windows, collectives_to_order
@@ -379,14 +385,18 @@ class WindowStats:
 def compute_window_stats(
     window_key: Tuple[str, str, int],
     collectives: List[Collective],
-    threshold_ms: float = 5.0,
+    k: float = 3.0,
+    floor_ms: float = 20.0,
 ) -> WindowStats:
     """
     Compute per-rank timing stats for a single window and identify stragglers.
 
-    Straggler identification: rank with largest deviation from median on time_created_ns,
-    if deviation exceeds threshold_ms.
+    Straggler identification: single-worst-outlier with gap-to-runner-up.
+    Flags the rank with largest offset only if its gap to the runner-up exceeds
+    a threshold based on k * stdev(non-worst offsets) or floor_ms.
     """
+    import math
+
     # Group collectives by rank
     by_rank: Dict[str, List[Collective]] = defaultdict(list)
     for c in collectives:
@@ -411,7 +421,7 @@ def compute_window_stats(
     min_started = min(all_started) if all_started else 0
 
     for rank_id, rank_colls in by_rank.items():
-        # time_created offsets
+        # time_created offsets (relative to window min for readability)
         created_offsets = [(c.time_created_ns - min_created) / 1e6 for c in rank_colls]
         mean_created = sum(created_offsets) / len(created_offsets)
 
@@ -438,7 +448,7 @@ def compute_window_stats(
             mean_gpu_duration_us=mean_gpu_dur,
         )
 
-    # Compute medians across ranks
+    # Compute medians across ranks (kept for reporting, not used in flagging)
     created_values = sorted(rs.mean_created_offset_ms for rs in rank_stats.values())
     started_values = sorted(rs.mean_started_offset_ms for rs in rank_stats.values())
     gpu_dur_values = sorted(rs.mean_gpu_duration_us for rs in rank_stats.values())
@@ -455,40 +465,36 @@ def compute_window_stats(
     med_started = median(started_values)
     med_gpu_dur = median(gpu_dur_values)
 
-    # Identify stragglers: rank with max deviation from median on time_created
+    # --- Single-worst-outlier with gap-to-runner-up ---
     straggler_ranks = set()
     straggler_signal = ""
 
     if len(rank_stats) >= 2:
-        # Check time_created first (host-side signal)
-        max_dev_rank = None
-        max_dev = 0.0
-        for rank_id, rs in rank_stats.items():
-            dev = rs.mean_created_offset_ms - med_created
-            if dev > max_dev:
-                max_dev = dev
-                max_dev_rank = rank_id
+        # Sort ranks by time_created offset descending
+        sorted_by_created = sorted(
+            rank_stats.items(),
+            key=lambda x: x[1].mean_created_offset_ms,
+            reverse=True,
+        )
+        worst_rank, worst_rs = sorted_by_created[0]
+        worst_offset = worst_rs.mean_created_offset_ms
+        runner_up_offset = sorted_by_created[1][1].mean_created_offset_ms
+        gap = worst_offset - runner_up_offset
 
-        if max_dev_rank is not None and max_dev > threshold_ms:
-            straggler_ranks.add(max_dev_rank)
-            straggler_signal = f"time_created +{max_dev:.1f}ms"
+        # Compute gap threshold
+        if len(sorted_by_created) <= 2:
+            gap_threshold = floor_ms
+        else:
+            # stdev of non-worst offsets
+            non_worst_offsets = [rs.mean_created_offset_ms for _, rs in sorted_by_created[1:]]
+            mean_non_worst = sum(non_worst_offsets) / len(non_worst_offsets)
+            variance = sum((x - mean_non_worst) ** 2 for x in non_worst_offsets) / len(non_worst_offsets)
+            stdev = math.sqrt(variance)
+            gap_threshold = max(k * stdev, floor_ms)
 
-        # Also check time_started
-        max_started_dev_rank = None
-        max_started_dev = 0.0
-        for rank_id, rs in rank_stats.items():
-            dev = rs.mean_started_offset_ms - med_started
-            if dev > max_started_dev:
-                max_started_dev = dev
-                max_started_dev_rank = rank_id
-
-        if max_started_dev_rank is not None and max_started_dev > threshold_ms:
-            if max_started_dev_rank not in straggler_ranks:
-                straggler_ranks.add(max_started_dev_rank)
-                if straggler_signal:
-                    straggler_signal += f"; time_started +{max_started_dev:.1f}ms (rank {max_started_dev_rank})"
-                else:
-                    straggler_signal = f"time_started +{max_started_dev:.1f}ms"
+        if gap > gap_threshold:
+            straggler_ranks.add(worst_rank)
+            straggler_signal = f"time_created gap={gap:.1f}ms (thresh={gap_threshold:.1f}ms)"
 
     return WindowStats(
         key=window_key,
@@ -532,7 +538,12 @@ def build_cascade_graph(
     Edges = windows sharing any participating rank, directed by global_idx (lower → higher).
     HEADs = nodes with no straggler-predecessor (empty predecessors list).
     """
-    straggler_windows = {k: ws for k, ws in window_stats.items() if ws.straggler_ranks}
+    # Filter out default_pg: it includes all ranks and happens at init,
+    # so it would become HEAD and connect to everything, masking real root causes.
+    straggler_windows = {
+        k: ws for k, ws in window_stats.items()
+        if ws.straggler_ranks and k[1] != "default_pg"
+    }
 
     if not straggler_windows:
         return CascadeResult(
@@ -837,7 +848,8 @@ def print_ground_truth_comparison(
 # Main
 # ---------------------------------------------------------------------------
 
-def analyze(trace_dir: str, verbose: bool = False, pg_filter: Optional[str] = None, threshold_ms: float = 5.0):
+def analyze(trace_dir: str, verbose: bool = False, pg_filter: Optional[str] = None,
+            k: float = 3.0, floor_ms: float = 20.0):
     """Run the full analysis pipeline."""
 
     # 1. Load
@@ -854,10 +866,10 @@ def analyze(trace_dir: str, verbose: bool = False, pg_filter: Optional[str] = No
         logger.info(f"  [gidx={gidx}] ({megatron_id}, {pg_desc}, win={window_idx}): {len(windows[key])} entries, ranks={sorted(ranks, key=int)}")
 
     # 3. Per-window stats + straggler identification
-    logger.info("\nComputing per-window statistics...")
+    logger.info(f"\nComputing per-window statistics (k={k}, floor_ms={floor_ms})...")
     all_window_stats: Dict[Tuple[str, str, int], WindowStats] = {}
     for key, colls in windows.items():
-        all_window_stats[key] = compute_window_stats(key, colls, threshold_ms=threshold_ms)
+        all_window_stats[key] = compute_window_stats(key, colls, k=k, floor_ms=floor_ms)
     straggler_count = sum(1 for ws in all_window_stats.values() if ws.straggler_ranks)
     logger.info(f"  {len(all_window_stats)} windows analyzed, {straggler_count} with stragglers")
 
@@ -999,14 +1011,144 @@ def test_synthetic_branching():
     print("\n✓ Synthetic branching test PASSED\n")
 
 
+def analyze_quiet(trace_dir: str, k: float, floor_ms: float) -> dict:
+    """Run analysis without logging, return summary stats for grid sweep."""
+    collectives_by_file, pg_configs, pg_status = load_trace_dir(trace_dir)
+    windows, collectives_to_order = group_collectives_by_windows(collectives_by_file)
+
+    all_window_stats: Dict[Tuple[str, str, int], WindowStats] = {}
+    for key, colls in windows.items():
+        all_window_stats[key] = compute_window_stats(key, colls, k=k, floor_ms=floor_ms)
+
+    cascade = build_cascade_graph(all_window_stats, collectives_to_order)
+
+    ground_truth = load_ground_truth(trace_dir)
+    inject_type = ground_truth.get("inject_type", "none")
+    inject_rank = ground_truth.get("inject_rank")
+
+    straggler_count = sum(1 for ws in all_window_stats.values() if ws.straggler_ranks)
+    head_straggler_ranks = set()
+    for head_key in cascade.heads:
+        ws = all_window_stats.get(head_key)
+        if ws:
+            head_straggler_ranks.update(ws.straggler_ranks)
+
+    hit = inject_rank is not None and str(inject_rank) in head_straggler_ranks
+
+    return {
+        "inject_type": inject_type,
+        "inject_rank": inject_rank,
+        "n_windows": len(windows),
+        "n_straggler_windows": straggler_count,
+        "n_heads": len(cascade.heads),
+        "head_straggler_ranks": head_straggler_ranks,
+        "hit": hit,
+    }
+
+
+def grid_sweep(trace_dirs: List[str]):
+    """Run grid sweep over k and floor_ms values."""
+    k_values = [1.5, 2.0, 3.0]
+    floor_values = [5.0, 10.0, 20.0]
+
+    print("\n" + "=" * 80)
+    print("GRID SWEEP: Single-worst-outlier with gap-to-runner-up")
+    print("=" * 80)
+
+    # Categorize traces
+    baselines = []
+    injections = []
+    for td in trace_dirs:
+        gt = load_ground_truth(td)
+        if gt.get("inject_type") == "none":
+            baselines.append(td)
+        else:
+            injections.append((td, gt))
+
+    print(f"\nTraces: {len(baselines)} baseline, {len(injections)} injection")
+    for td, gt in injections:
+        print(f"  - {os.path.basename(td)}: {gt.get('inject_type')} rank {gt.get('inject_rank')} @ {gt.get('inject_delay_ms')}ms")
+
+    # Run grid
+    results = []
+    for k in k_values:
+        for floor_ms in floor_values:
+            row = {"k": k, "floor_ms": floor_ms}
+
+            # Baseline HEADs
+            baseline_heads = []
+            for td in baselines:
+                r = analyze_quiet(td, k, floor_ms)
+                baseline_heads.append(r["n_heads"])
+            row["baseline_heads"] = baseline_heads
+
+            # Injection hits
+            injection_hits = []
+            for td, gt in injections:
+                r = analyze_quiet(td, k, floor_ms)
+                injection_hits.append({
+                    "name": os.path.basename(td),
+                    "inject_rank": gt.get("inject_rank"),
+                    "hit": r["hit"],
+                    "n_heads": r["n_heads"],
+                    "head_ranks": r["head_straggler_ranks"],
+                })
+            row["injection_hits"] = injection_hits
+
+            results.append(row)
+
+    # Print results table
+    print("\n" + "-" * 80)
+    print(f"{'k':>4} | {'floor':>5} | {'baseline #HEADs':>15} | injection HEADs contain injected rank?")
+    print("-" * 80)
+
+    passing_cells = []
+    for row in results:
+        k, floor_ms = row["k"], row["floor_ms"]
+        bh = row["baseline_heads"]
+        baseline_str = ",".join(str(h) for h in bh) if len(bh) <= 3 else f"max={max(bh)}"
+
+        hits = row["injection_hits"]
+        hit_strs = []
+        all_hit = True
+        for h in hits:
+            mark = "✓" if h["hit"] else "✗"
+            hit_strs.append(f"r{h['inject_rank']}:{mark}")
+            if not h["hit"]:
+                all_hit = False
+
+        # Pass criteria: baseline ≤1 HEAD each, all injections hit
+        baseline_pass = all(h <= 1 for h in bh)
+        if baseline_pass and all_hit:
+            passing_cells.append((k, floor_ms))
+
+        status = "PASS" if (baseline_pass and all_hit) else ""
+        print(f"{k:>4.1f} | {floor_ms:>5.0f} | {baseline_str:>15} | {' '.join(hit_strs)} {status}")
+
+    print("-" * 80)
+
+    if passing_cells:
+        # Pick most conservative (largest k, then largest floor_ms)
+        best = max(passing_cells, key=lambda x: (x[0], x[1]))
+        print(f"\n✓ BEST CELL: k={best[0]}, floor_ms={best[1]} (most conservative passing)")
+    else:
+        print("\n✗ NO PASSING CELL — review results above")
+
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description="FR Straggler Analyzer")
     parser.add_argument("trace_dir", nargs="?", help="Path to trace directory containing _dump_*.json files")
     parser.add_argument("-v", "--verbose", action="store_true", help="Detailed per-rank per-window output")
     parser.add_argument("--pg", default=None, help="Filter output to PGs matching this substring")
-    parser.add_argument("--threshold-ms", type=float, default=5.0,
-                        help="Straggler detection threshold in ms (default: 5.0)")
+    parser.add_argument("--k", type=float, default=3.0,
+                        help="Stdev multiplier for gap threshold (default: 3.0)")
+    parser.add_argument("--floor-ms", type=float, default=20.0,
+                        help="Minimum gap threshold in ms (default: 20.0)")
     parser.add_argument("--test", action="store_true", help="Run synthetic tests")
+    parser.add_argument("--grid-sweep", nargs="+", metavar="TRACE_DIR",
+                        help="Run grid sweep on multiple trace directories")
     args = parser.parse_args()
 
     if args.test:
@@ -1014,8 +1156,12 @@ def main():
         test_synthetic_branching()
         return
 
+    if args.grid_sweep:
+        grid_sweep(args.grid_sweep)
+        return
+
     if not args.trace_dir:
-        parser.error("trace_dir is required unless --test is specified")
+        parser.error("trace_dir is required unless --test or --grid-sweep is specified")
 
     # Auto-save output to {trace_dir}/analysis.log alongside run_config.log
     log_path = os.path.join(args.trace_dir, "analysis.log")
@@ -1024,7 +1170,7 @@ def main():
     logger.addHandler(file_handler)
     logger.info(f"Auto-saving output to {log_path}")
 
-    analyze(args.trace_dir, verbose=args.verbose, pg_filter=args.pg, threshold_ms=args.threshold_ms)
+    analyze(args.trace_dir, verbose=args.verbose, pg_filter=args.pg, k=args.k, floor_ms=args.floor_ms)
 
 
 if __name__ == "__main__":

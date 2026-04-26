@@ -19,22 +19,36 @@ echo "Type: ${INJECT_TYPE}, Rank: ${INJECT_RANK}, Delay: ${INJECT_DELAY_MS}ms"
 echo "Output: ${OUTPUT_DIR}"
 echo "======================================="
 
-docker exec wei_straggler_exp bash -c "
-  mkdir -p ${OUTPUT_DIR} &&
-  echo 'inject_type: ${INJECT_TYPE}
+docker exec sarju2_straggler_exp bash -c "
+set -e
+mkdir -p ${OUTPUT_DIR}
+echo 'inject_type: ${INJECT_TYPE}
 inject_rank: ${INJECT_RANK}
 inject_delay_ms: ${INJECT_DELAY_MS}
 timestamp: ${TIMESTAMP}
 parallelism: TP=2, PP=1, DP=4
-num_iterations: 30' > ${OUTPUT_DIR}/run_config.log &&
-  cd /workspace/nvidia-resiliency-ext &&
-  TORCH_NCCL_TRACE_BUFFER_SIZE=10000 \
-  TORCH_NCCL_ENABLE_TIMING=1 \
-  NCCL_NVLS_ENABLE=0 \
-  torchrun --nproc_per_node=8 \
-    experiments/straggler_injection/run_straggler_exp.py \
-    --inject-type ${INJECT_TYPE} \
-    --inject-rank ${INJECT_RANK} \
-    --inject-delay-ms ${INJECT_DELAY_MS} \
-    --output-dir ${OUTPUT_DIR}
+num_iterations: 30' > ${OUTPUT_DIR}/run_config.log
+cd /workspace/nvidia-resiliency-ext
+
+# Launch the online straggler monitor in background. It polls the trace dir
+# as the trainer writes chunks, emits verdicts.jsonl, and self-exits on
+# quiescence (no new chunks for --quiescence-s seconds).
+python3 experiments/straggler_injection/fr_straggler_monitor.py \
+    ${OUTPUT_DIR} --world-size 8 > ${OUTPUT_DIR}/monitor.log 2>&1 &
+MONITOR_PID=\$!
+echo \"[run.sh] monitor pid=\${MONITOR_PID}\"
+
+PYTHONPATH=/workspace/Megatron-LM:/workspace/nvidia-resiliency-ext/src \
+TORCH_NCCL_TRACE_BUFFER_SIZE=500 \
+TORCH_NCCL_ENABLE_TIMING=1 \
+NCCL_NVLS_ENABLE=0 \
+torchrun --nproc_per_node=8 \
+  experiments/straggler_injection/run_straggler_exp.py \
+  --inject-type ${INJECT_TYPE} \
+  --inject-rank ${INJECT_RANK} \
+  --inject-delay-ms ${INJECT_DELAY_MS} \
+  --output-dir ${OUTPUT_DIR}
+
+# Wait for monitor to drain and exit on its own quiescence timer.
+wait \${MONITOR_PID}
 "

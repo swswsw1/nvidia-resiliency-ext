@@ -79,6 +79,13 @@ def parse_args():
         default="./traces",
         help="Directory to dump FR traces",
     )
+    parser.add_argument(
+        "--buffer-size",
+        type=int,
+        default=int(os.environ.get("TORCH_NCCL_TRACE_BUFFER_SIZE", "0")),
+        help="FR ring buffer size (defaults to TORCH_NCCL_TRACE_BUFFER_SIZE env var). "
+             "Must comfortably exceed one iteration's collective count to avoid eviction.",
+    )
     return parser.parse_args()
 
 
@@ -169,26 +176,93 @@ def forward_step_func(
     return output_tensor, partial(loss_func, loss_mask)
 
 
-def dump_fr_traces(output_dir: str):
-    """Dump FR traces from all ranks to JSON files."""
-    os.makedirs(output_dir, exist_ok=True)
-    rank = dist.get_rank()
-
+def _snapshot_fr_trace() -> Dict[str, Any]:
     trace_bytes = torch._C._distributed_c10d._dump_nccl_trace(
         includeCollectives=True,
         includeStackTraces=False,
         onlyActive=False,
     )
-    trace_dict = pickle.loads(trace_bytes)
+    return pickle.loads(trace_bytes)
 
-    output_path = os.path.join(output_dir, f"_dump_{rank}.json")
-    with open(output_path, "w") as f:
-        json.dump(trace_dict, f, indent=4)
-        os.fsync(f.fileno())
 
-    dist.barrier()
-    if rank == 0:
-        print(f"FR traces dumped to {output_dir}/ ({dist.get_world_size()} ranks)")
+def _max_seq_id_per_pg(entries) -> Dict[Any, int]:
+    """Max collective_seq_id seen per pg_id in a trace snapshot."""
+    result: Dict[Any, int] = {}
+    for e in entries:
+        pg = e.get("pg_id")
+        sid = e.get("collective_seq_id", 0) or 0
+        if pg is None:
+            continue
+        if sid > result.get(pg, -1):
+            result[pg] = sid
+    return result
+
+
+class IterationDumper:
+    """Called at the end of each training iteration to snapshot the full FR
+    ring buffer and write it as a chunk file. Does NOT cuda.synchronize() —
+    the trainer's natural timing is preserved, which means some entries in
+    a given snapshot may have null GPU timing fields (kernels still in flight).
+
+    Chunks overlap heavily (every chunk is the current buffer snapshot), but
+    that is deliberate: the FR watchdog keeps populating GPU timing fields
+    in-place as kernels complete, so later snapshots of the same entry have
+    more complete fields. The monitor's merger does last-write-wins on
+    (pg_id, seq_id, p2p_seq_id), so entries mature over successive dumps.
+
+    Contract: buffer_size must be > collectives_per_iter, otherwise the ring
+    buffer evicts entries before any snapshot can see them. This is detected
+    by tracking the max seq_id seen per PG across successive dumps and
+    warning when an unseen-but-expected seq_id is missed.
+    """
+
+    def __init__(self, output_dir: str, rank: int, buffer_size: int):
+        self.output_dir = output_dir
+        self.rank = rank
+        self.buffer_size = buffer_size
+        self.max_seen: Dict[Any, int] = {}  # pg_id -> max seq_id ever observed
+        self.total_entries_written = 0
+        os.makedirs(output_dir, exist_ok=True)
+
+    def capture_iteration(self, iteration: int):
+        trace = _snapshot_fr_trace()
+        entries = trace.get("entries", [])
+
+        # Buffer-overflow detection: smallest seq_id in the snapshot, per PG,
+        # should be <= (previous max_seen + 1). If it's strictly greater,
+        # entries were evicted before any dump captured them.
+        pg_min: Dict[Any, int] = {}
+        pg_max: Dict[Any, int] = {}
+        for e in entries:
+            pg = e.get("pg_id")
+            sid = e.get("collective_seq_id")
+            if pg is None or sid is None:
+                continue
+            if sid < pg_min.get(pg, 10**12):
+                pg_min[pg] = sid
+            if sid > pg_max.get(pg, -1):
+                pg_max[pg] = sid
+        for pg, smallest in pg_min.items():
+            prev_max = self.max_seen.get(pg, -1)
+            if prev_max >= 0 and smallest > prev_max + 1:
+                gap = smallest - prev_max - 1
+                print(f"[Rank {self.rank}] WARNING: iter={iteration} pg={pg} "
+                      f"lost {gap} entries (expected seq>={prev_max + 1}, "
+                      f"observed seq>={smallest}). "
+                      f"Increase TORCH_NCCL_TRACE_BUFFER_SIZE.")
+        for pg, mx in pg_max.items():
+            if mx > self.max_seen.get(pg, -1):
+                self.max_seen[pg] = mx
+
+        path = os.path.join(
+            self.output_dir, f"_dump_{self.rank}_iter{iteration:04d}.json"
+        )
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(trace, f)   # full snapshot, no filter
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        self.total_entries_written += len(entries)
 
 
 def estimate_gpu_cycles(delay_ms: float) -> int:
@@ -235,10 +309,29 @@ def main():
     train_iterator = get_train_data_iterator()
     forward_backward_func = get_forward_backward_func()
 
+    # Synchronous dumper: captures at iteration boundaries. Requires
+    # buffer_size > collectives_per_iter (otherwise ring buffer evicts
+    # before the dumper sees them; IterationDumper will warn on detection).
+    if args.buffer_size <= 0:
+        raise RuntimeError(
+            "buffer_size must be > 0. Set TORCH_NCCL_TRACE_BUFFER_SIZE or pass --buffer-size."
+        )
+    dumper = IterationDumper(
+        output_dir=args.output_dir,
+        rank=rank,
+        buffer_size=args.buffer_size,
+    )
+
     # Precompute injection parameters
     delay_s = args.inject_delay_ms / 1000.0
     gpu_delay_cycles = estimate_gpu_cycles(args.inject_delay_ms)
-    is_inject_rank = (rank == args.inject_rank)
+    # Support comma-separated ranks via env var INJECT_RANKS for multi-injection tests.
+    env_ranks = os.environ.get("INJECT_RANKS", "").strip()
+    if env_ranks:
+        inject_rank_set = {int(r) for r in env_ranks.split(",") if r}
+    else:
+        inject_rank_set = {args.inject_rank}
+    is_inject_rank = rank in inject_rank_set
 
     if is_inject_rank and args.inject_type != "none":
         print(f"[Rank {rank}] Will inject {args.inject_type} straggler: "
@@ -276,12 +369,27 @@ def main():
         finalize_model_grads([gpt_model])
         optim.step()
 
+        # Snapshot the FR ring buffer WITHOUT a cuda.synchronize() — the
+        # training loop's natural timing is preserved. Some entries may
+        # have null GPU-timing fields; those fields populate in subsequent
+        # snapshots, and the monitor's merger takes last-write-wins.
+        dumper.capture_iteration(iteration)
+
+        # Barrier between iterations: forces all ranks to resync. Prevents
+        # the cascade from dragging peers into lockstep across iters, so the
+        # injected straggler's within-window asymmetry is preserved every
+        # iter (not just iter 0).
+        dist.barrier()
+
         iter_time = time.time() - iter_start
         if rank == 0:
             print(f"Iteration {iteration}: loss={losses_reduced}, time={iter_time:.3f}s")
 
-    # Dump FR traces
-    dump_fr_traces(args.output_dir)
+    dist.barrier()
+    if rank == 0:
+        print(f"FR traces dumped to {args.output_dir}/ "
+              f"(rank 0 wrote {dumper.total_entries_written} entries across "
+              f"{_NUM_ITERATIONS} iteration chunks)")
 
     # Cleanup
     parallel_state.destroy_model_parallel()

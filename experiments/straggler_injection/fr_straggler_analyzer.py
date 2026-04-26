@@ -48,6 +48,7 @@ class Collective:
     time_created_ns: int
     time_discovered_started_ns: Optional[int]
     time_discovered_completed_ns: Optional[int]
+    duration_ms: Optional[float]    # true kernel duration via cudaEventElapsedTime
     process_group: List[str]  # [megatron_id, pg_desc]
     input_sizes: List[List[int]]
     output_sizes: List[List[int]]
@@ -124,6 +125,7 @@ def load_trace_dir(trace_dir: str) -> Tuple[Dict[str, List[Collective]], Dict[st
                 time_created_ns=entry["time_created_ns"],
                 time_discovered_started_ns=entry.get("time_discovered_started_ns"),
                 time_discovered_completed_ns=entry.get("time_discovered_completed_ns"),
+                duration_ms=entry.get("duration_ms"),
                 process_group=entry["process_group"],
                 input_sizes=entry.get("input_sizes", []),
                 output_sizes=entry.get("output_sizes", []),
@@ -345,12 +347,6 @@ def group_collectives_by_windows(
     # Pass 2: Cross-rank ordering
     grouped_windows, collectives_to_order = _order_windows_globally(windows_by_rank)
 
-    # Filter out default_pg: it includes all ranks, so any timing variance makes it
-    # a false-positive HEAD that sweeps everything downstream into one cascade.
-    # Stragglers don't originate in default_pg — it's just init coordination.
-    # grouped_windows = {k: v for k, v in grouped_windows.items() if k[1] != "default_pg"}
-    # collectives_to_order = {k: v for k, v in collectives_to_order.items() if k[1] != "default_pg"}
-
     logger.info(f"Pass 2 (column ordering): {len(grouped_windows)} unique window groups")
 
     return grouped_windows, collectives_to_order
@@ -367,7 +363,7 @@ class RankWindowStats:
     n_entries: int
     mean_created_offset_ms: float   # mean(time_created - window_min_created) in ms
     mean_started_offset_ms: float   # mean(time_started - window_min_started) in ms
-    mean_gpu_duration_us: float     # mean(completed - started) in µs
+    mean_gpu_duration_us: float     # mean duration_ms * 1000 (cudaEventElapsedTime)
 
 
 @dataclass
@@ -391,12 +387,18 @@ def compute_window_stats(
     """
     Compute per-rank timing stats for a single window and identify stragglers.
 
-    Straggler identification: single-worst-outlier with gap-to-runner-up.
-    Flags the rank with largest offset only if its gap to the runner-up exceeds
-    a threshold based on k * stdev(non-worst offsets) or floor_ms.
-    """
-    import math
+    Two independent detection paths, both can fire on the same window:
+      1. Host-side: gap-to-runner-up on time_created_ns. Catches host
+         injections (sleep on the rank's CPU) where the rank enqueues late.
+      2. Kernel-side: median+MAD deficit on duration_ms. Catches kernel
+         injections. 
 
+    NOTE: kernel-side detection uses within-window median+MAD, NOT a
+    per-rank baseline. This is intentional — duration_ms on a waiting rank
+    INFLATES during cascade while a rank's own duration may DROP relative
+    to its baseline. Per-rank baseline would invert the signal and flag
+    victims as roots.
+    """
     # Group collectives by rank
     by_rank: Dict[str, List[Collective]] = defaultdict(list)
     for c in collectives:
@@ -432,12 +434,13 @@ def compute_window_stats(
                 started_offsets.append((c.time_discovered_started_ns - min_started) / 1e6)
         mean_started = sum(started_offsets) / len(started_offsets) if started_offsets else 0.0
 
-        # gpu_duration
+        # gpu_duration — use duration_ms field (cudaEventElapsedTime), converted to µs.
+        # Do NOT compute from time_discovered_completed_ns - time_discovered_started_ns;
+        # those are watchdog poll timestamps, not kernel boundaries (see fr_concepts.md §14).
         gpu_durs = []
         for c in rank_colls:
-            if c.time_discovered_started_ns is not None and c.time_discovered_completed_ns is not None:
-                dur_us = (c.time_discovered_completed_ns - c.time_discovered_started_ns) / 1e3
-                gpu_durs.append(dur_us)
+            if c.duration_ms is not None:
+                gpu_durs.append(c.duration_ms * 1000.0)   # ms -> µs for display compatibility
         mean_gpu_dur = sum(gpu_durs) / len(gpu_durs) if gpu_durs else 0.0
 
         rank_stats[rank_id] = RankWindowStats(
@@ -465,36 +468,97 @@ def compute_window_stats(
     med_started = median(started_values)
     med_gpu_dur = median(gpu_dur_values)
 
-    # --- Single-worst-outlier with gap-to-runner-up ---
+    # --- Host-side detection on time_created_ns ---
+    # Two regimes by window size:
+    #   n >= 3: median + MAD. Flags every rank with excess above threshold.
+    #     Robust against >1 stragglers per window and handles cascade
+    #     situations where multiple ranks are off-median.
+    #   n == 2: MAD is degenerate (MAD = range/2, so k*MAD always > excess
+    #     for k>1 → never fires). Fall back to gap-to-runner-up vs floor.
+    #     With n=2 the "gap" is just |a-b|, which we compare to floor_ms.
     straggler_ranks = set()
     straggler_signal = ""
+    n = len(rank_stats)
 
-    if len(rank_stats) >= 2:
-        # Sort ranks by time_created offset descending
+    if n >= 3:
+        created_offsets = [rs.mean_created_offset_ms for rs in rank_stats.values()]
+        created_median = median(sorted(created_offsets))
+        created_mad = median(sorted(abs(v - created_median) for v in created_offsets))
+        mad_scale = 1.4826 * created_mad if created_mad > 0 else 0.0
+
+        threshold = max(floor_ms, k * mad_scale)
+        host_flags = []
+        for rank_id, rs in rank_stats.items():
+            excess = rs.mean_created_offset_ms - created_median
+            if excess > threshold:
+                straggler_ranks.add(rank_id)
+                host_flags.append(f"r{rank_id}={rs.mean_created_offset_ms:.1f}ms (excess={excess:.1f}ms)")
+        if host_flags:
+            straggler_signal = (f"time_created median={created_median:.1f}ms "
+                                f"thresh={threshold:.1f}ms (MAD={created_mad:.2f}): "
+                                + ", ".join(host_flags))
+
+    elif n == 2:
         sorted_by_created = sorted(
             rank_stats.items(),
             key=lambda x: x[1].mean_created_offset_ms,
             reverse=True,
         )
         worst_rank, worst_rs = sorted_by_created[0]
-        worst_offset = worst_rs.mean_created_offset_ms
-        runner_up_offset = sorted_by_created[1][1].mean_created_offset_ms
-        gap = worst_offset - runner_up_offset
-
-        # Compute gap threshold
-        if len(sorted_by_created) <= 2:
-            gap_threshold = floor_ms
-        else:
-            # stdev of non-worst offsets
-            non_worst_offsets = [rs.mean_created_offset_ms for _, rs in sorted_by_created[1:]]
-            mean_non_worst = sum(non_worst_offsets) / len(non_worst_offsets)
-            variance = sum((x - mean_non_worst) ** 2 for x in non_worst_offsets) / len(non_worst_offsets)
-            stdev = math.sqrt(variance)
-            gap_threshold = max(k * stdev, floor_ms)
-
-        if gap > gap_threshold:
+        gap = worst_rs.mean_created_offset_ms - sorted_by_created[1][1].mean_created_offset_ms
+        if gap > floor_ms:
             straggler_ranks.add(worst_rank)
-            straggler_signal = f"time_created gap={gap:.1f}ms (thresh={gap_threshold:.1f}ms)"
+            straggler_signal = f"time_created gap={gap:.1f}ms (thresh={floor_ms:.1f}ms, n=2 floor-only)"
+
+    # --- Kernel-side detection on duration_ms (cudaEventElapsedTime) ---
+    # Within-window median+MAD comparison. Flags ranks whose duration is
+    # abnormally SHORT vs the window's median — kernel straggler arrived
+    # late and its peers' kernels then ran for less wall-clock time
+    # because they finished and waited. The "late arriver" itself can have
+    # an inflated duration; what we detect here is its peers' DEFICIT
+    # against the median. Either way the window gets flagged, which is
+    # what matters for PG-level origin identification.
+    #
+    # NOTE: ignores `floor_ms` (that's ms-scale for time_created; kernels
+    # can be µs). Uses scale-aware floor below. Constants 50µs / 25% are
+    # tuned empirically on TP=2 8-rank traces; may need re-tuning on
+    # very large or very small collectives.
+    gpu_means_us = [rs.mean_gpu_duration_us for rs in rank_stats.values()
+                    if rs.mean_gpu_duration_us > 0]
+    if len(gpu_means_us) >= 2:
+        gpu_median_us = median(sorted(gpu_means_us))
+        gpu_mad_us = median(sorted(abs(v - gpu_median_us) for v in gpu_means_us))
+        # 1.4826 * MAD ≈ stdev for normally-distributed data.
+        mad_scale_us = 1.4826 * gpu_mad_us if gpu_mad_us > 0 else 0.0
+        # Scale-aware floor: absolute noise floor (50µs) + relative floor
+        # (25% of window median). Absolute prevents flagging pure µs-scale
+        # jitter; relative scales with collective size so the same
+        # detector works on 100µs TP kernels and 100ms DP allreduces.
+        absolute_noise_floor_us = 50.0
+        relative_floor_us = 0.25 * gpu_median_us
+        gpu_floor_us = max(absolute_noise_floor_us, relative_floor_us)
+        for rank_id, rs in rank_stats.items():
+            if rs.mean_gpu_duration_us <= 0:
+                continue
+            deficit_us = gpu_median_us - rs.mean_gpu_duration_us
+            if mad_scale_us > 0:
+                z_ok = deficit_us > k * mad_scale_us
+            else:
+                z_ok = True   # MAD=0 — trust the floor
+            if z_ok and deficit_us > gpu_floor_us:
+                straggler_ranks.add(rank_id)
+                if mad_scale_us > 0:
+                    extra = (f"gpu_dur={rs.mean_gpu_duration_us:.0f}µs vs "
+                             f"median={gpu_median_us:.0f}µs "
+                             f"(deficit={deficit_us:.0f}µs, "
+                             f"{deficit_us / mad_scale_us:.1f}σ, "
+                             f"floor={gpu_floor_us:.0f}µs)")
+                else:
+                    extra = (f"gpu_dur={rs.mean_gpu_duration_us:.0f}µs vs "
+                             f"median={gpu_median_us:.0f}µs "
+                             f"(deficit={deficit_us:.0f}µs, MAD=0, "
+                             f"floor={gpu_floor_us:.0f}µs)")
+                straggler_signal = (straggler_signal + "; " + extra) if straggler_signal else extra
 
     return WindowStats(
         key=window_key,
@@ -538,11 +602,25 @@ def build_cascade_graph(
     Edges = windows sharing any participating rank, directed by global_idx (lower → higher).
     HEADs = nodes with no straggler-predecessor (empty predecessors list).
     """
-    # Filter out init windows (win≤1): rank 0 has startup coordination overhead
-    # that creates false straggler signals. Real stragglers appear in steady-state.
+    # World size = union of all observed ranks across all windows. A PG whose
+    # roster matches this set is "universal" (e.g. default_pg) and carries no
+    # causal info — every rank participates, so straggler-on-universal can be
+    # explained by any earlier non-universal PG. Drop these from the graph.
+    all_ranks: Set[str] = set()
+    for ws in window_stats.values():
+        all_ranks.update(ws.rank_stats.keys())
+
+    # Filter out init/cold-start windows. NCCL/CUDA initialization, JIT compile,
+    # and first-iter caching produce ~25-30ms cross-rank skews on a per-pair
+    # basis for the first several iters, with the sign of the skew flipping
+    # iter-to-iter. These flips can promote a wrong-rank flag to HEAD before
+    # the steady-state injection signal stabilizes (typically by iter 10+).
+    INIT_WINDOW_FILTER = 10
     straggler_windows = {
         k: ws for k, ws in window_stats.items()
-        if ws.straggler_ranks and k[2] >= 2  # k[2] is window_idx
+        if ws.straggler_ranks
+        and k[2] >= INIT_WINDOW_FILTER  # k[2] is window_idx
+        and set(ws.rank_stats.keys()) != all_ranks  # exclude universal PGs
     }
 
     if not straggler_windows:
@@ -856,7 +934,6 @@ def analyze(trace_dir: str, verbose: bool = False, pg_filter: Optional[str] = No
     collectives_by_file, pg_configs, pg_status = load_trace_dir(trace_dir)
 
     # 2. Window (two-pass: row compaction → column ordering)
-    # Returns both grouped windows and their global ordering (no default_pg hack)
     windows, collectives_to_order = group_collectives_by_windows(collectives_by_file)
     logger.info(f"\nWindowing produced {len(windows)} unique window groups:")
     for key in sorted(windows.keys(), key=lambda k: collectives_to_order.get(k, 0)):
@@ -900,9 +977,9 @@ def test_synthetic_abc():
     print("\n=== Synthetic A/B/C Test ===\n")
 
     # Create mock WindowStats
-    key_a: WindowKey = ("mg_a", "PG_A", 0)
-    key_b: WindowKey = ("mg_b", "PG_B", 0)
-    key_c: WindowKey = ("mg_c", "PG_C", 0)
+    key_a: WindowKey = ("mg_a", "PG_A", 2)
+    key_b: WindowKey = ("mg_b", "PG_B", 2)
+    key_c: WindowKey = ("mg_c", "PG_C", 2)
 
     # A has ranks {0, 1}, B has ranks {0,1,2,3,4,5,6,7}, C has ranks {6, 7}
     # A↔B share {0,1}, B↔C share {6,7}, A and C don't share
@@ -936,7 +1013,7 @@ def test_synthetic_abc():
     cascade = build_cascade_graph(window_stats, collectives_to_order)
 
     print(f"HEADs: {cascade.heads}")
-    print(f"Expected: {{('mg_a', 'PG_A', 0)}}")
+    print(f"Expected: {{('mg_a', 'PG_A', 2)}}")
     assert cascade.heads == {key_a}, f"Expected HEAD={{A}}, got {cascade.heads}"
 
     print(f"\nPredecessors[A]: {cascade.predecessors[key_a]}")
@@ -963,9 +1040,9 @@ def test_synthetic_branching():
     """
     print("\n=== Synthetic Branching Test ===\n")
 
-    key_a: WindowKey = ("mg_a", "PG_A", 0)
-    key_b: WindowKey = ("mg_b", "PG_B", 0)
-    key_c: WindowKey = ("mg_c", "PG_C", 0)
+    key_a: WindowKey = ("mg_a", "PG_A", 2)
+    key_b: WindowKey = ("mg_b", "PG_B", 2)
+    key_c: WindowKey = ("mg_c", "PG_C", 2)
 
     # A has ranks {0,1,2,3}, B has {0,1}, C has {2,3}
     # A↔B share {0,1}, A↔C share {2,3}, B and C don't share

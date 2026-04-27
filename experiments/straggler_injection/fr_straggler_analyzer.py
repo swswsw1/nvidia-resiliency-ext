@@ -1,19 +1,26 @@
 """
 FR Straggler Analyzer — standalone offline analysis of FR traces from straggler injection experiments.
 
+Designed to consume one default_pg-bracketed BLOCK at a time (produced by the
+monitor's block slicer). Within a block, the terminal default_pg is the natural
+anchor — host/kernel straggler signals propagate to it, so we pick up flagged
+ranks there and walk backward through earlier flagged-for-this-rank windows
+until we hit a strict transition (next earlier rank-containing window not
+flagged for that rank). That window is the origin.
+
 Data flow:
   Load trace dir → Parse entries (completed only) → Build collectives_by_file
     → group_collectives_by_windows()
-    → Per-window per-rank stats (all 3 timing signals)
-    → Identify straggler rank(s) per window (max deviation from median)
-    → Build PG overlap graph (PGs sharing ranks get edges)
-    → Graph traversal to find root-cause PG (earliest straggler in causal chain)
+    → Per-window per-rank stats (host = late time_created, kernel = short duration_ms)
+    → find_anchor(): terminal default_pg in scope, its flagged ranks
+    → backward_walk(): per-rank backward walk to first-appearance window
+    → Origins sorted by gidx
     → Print results + ground truth comparison
 
 Usage:
-  python fr_straggler_analyzer.py /path/to/trace_dir
-  python fr_straggler_analyzer.py /path/to/trace_dir -v
-  python fr_straggler_analyzer.py /path/to/trace_dir --pg TENSOR
+  python fr_straggler_analyzer.py /path/to/block_dir
+  python fr_straggler_analyzer.py /path/to/block_dir -v
+  python fr_straggler_analyzer.py /path/to/block_dir --pg TENSOR
 """
 
 import argparse
@@ -570,171 +577,102 @@ def compute_window_stats(
         straggler_signal=straggler_signal,
     )
 
-
-# ---------------------------------------------------------------------------
-# 4. Graph traversal for cascade attribution
-#
-#    Builds an overlap graph of straggler-flagged windows and finds HEADs
-#    (cascade roots) via dynamic programming on global_idx ordering.
-# ---------------------------------------------------------------------------
-
 WindowKey = Tuple[str, str, int]
+
+# ---------------------------------------------------------------------------
+# 5. Backward-walk attribution
+#
+# Per the block-based design: the terminal default_pg is the propagation sink
+# where straggler signals converge. We pick its flagged ranks as the anchor
+# and walk backward — for each flagged rank, step to the most recent earlier
+# window where that rank participated and ALSO is flagged. Stop on strict
+# transition (next earlier rank-containing window has rank NOT flagged): that
+# transition marks where the rank's straggler signal first appeared in this
+# block. The current window at that moment is the origin.
+#
+# Independent walks per flagged rank (no fusion). Co-fault traces benefit
+# from this: each flagged rank's chain stands on its own.
+# ---------------------------------------------------------------------------
 
 
 @dataclass
-class CascadeResult:
-    """Result of cascade graph traversal."""
-    heads: Set[WindowKey]  # Windows with no straggler-predecessor
-    predecessors: Dict[WindowKey, List[WindowKey]]  # All predecessors per node
-    successors: Dict[WindowKey, List[WindowKey]]  # All successors per node
-    longest_path_length: Dict[WindowKey, int]  # For choosing chain in non-verbose mode
-    best_predecessor: Dict[WindowKey, Optional[WindowKey]]  # For longest chain reconstruction
+class Origin:
+    """Result of one rank's backward walk."""
+    rank: str
+    window_key: WindowKey
+    walk_depth: int   # number of backward steps taken (0 = origin is anchor)
 
 
-def build_cascade_graph(
+def find_anchor(
     window_stats: Dict[WindowKey, WindowStats],
     collectives_to_order: Dict[WindowKey, int],
-) -> CascadeResult:
+) -> Optional[WindowKey]:
+    """Return the highest-gidx default_pg window in scope, or None."""
+    default_keys = [k for k in window_stats if k[1] == "default_pg"]
+    if not default_keys:
+        return None
+    return max(default_keys, key=lambda k: collectives_to_order.get(k, 0))
+
+
+def backward_walk(
+    rank: str,
+    current: WindowKey,
+    window_stats: Dict[WindowKey, WindowStats],
+    collectives_to_order: Dict[WindowKey, int],
+) -> Tuple[WindowKey, int]:
     """
-    Build overlap graph of straggler windows and identify HEADs via dynamic programming.
+    Walk backward from `current` while `rank` stays flagged.
 
-    Nodes = windows with non-empty straggler_ranks.
-    Edges = windows sharing any participating rank, directed by global_idx (lower → higher).
-    HEADs = nodes with no straggler-predecessor (empty predecessors list).
+    Termination: strict transition. The most recent earlier window where
+    `rank` participated decides — if `rank` is flagged there, step back; if
+    not, return `current` (signal turned ON between that earlier window and
+    `current`). If no such earlier window exists, return `current` (edge of
+    scope).
+
+    Returns (origin_window_key, walk_depth).
     """
-    # World size = union of all observed ranks across all windows. A PG whose
-    # roster matches this set is "universal" (e.g. default_pg) and carries no
-    # causal info — every rank participates, so straggler-on-universal can be
-    # explained by any earlier non-universal PG. Drop these from the graph.
-    all_ranks: Set[str] = set()
-    for ws in window_stats.values():
-        all_ranks.update(ws.rank_stats.keys())
-
-    # Filter out init/cold-start windows. NCCL/CUDA initialization, JIT compile,
-    # and first-iter caching produce ~25-30ms cross-rank skews on a per-pair
-    # basis for the first several iters, with the sign of the skew flipping
-    # iter-to-iter. These flips can promote a wrong-rank flag to HEAD before
-    # the steady-state injection signal stabilizes (typically by iter 10+).
-    INIT_WINDOW_FILTER = 10
-    straggler_windows = {
-        k: ws for k, ws in window_stats.items()
-        if ws.straggler_ranks
-        and k[2] >= INIT_WINDOW_FILTER  # k[2] is window_idx
-        and set(ws.rank_stats.keys()) != all_ranks  # exclude universal PGs
-    }
-
-    if not straggler_windows:
-        return CascadeResult(
-            heads=set(),
-            predecessors={},
-            successors={},
-            longest_path_length={},
-            best_predecessor={},
-        )
-
-    # Map window keys → integer node IDs for efficient graph ops
-    keys = sorted(straggler_windows.keys(), key=lambda k: collectives_to_order.get(k, 0))
-    key_to_node = {k: i for i, k in enumerate(keys)}
-    node_to_key = {i: k for k, i in key_to_node.items()}
-
-    # Participating ranks per window (full membership, not just stragglers)
-    node_ranks: Dict[int, Set[str]] = {
-        key_to_node[k]: set(ws.rank_stats.keys()) for k, ws in straggler_windows.items()
-    }
-
-    # Build undirected adjacency (directionality applied at traversal time)
-    node_ids = list(node_to_key.keys())
-    neighbors: Dict[int, Set[int]] = defaultdict(set)
-    for n1 in node_ids:
-        for n2 in node_ids:
-            if n1 != n2 and node_ranks[n1] & node_ranks[n2]:
-                neighbors[n1].add(n2)
-                neighbors[n2].add(n1)
-
-    # Dynamic programming: compute predecessors and longest path for each node
-    node_order = {n: collectives_to_order.get(node_to_key[n], 0) for n in node_ids}
-    sorted_nodes = sorted(node_ids, key=lambda n: node_order[n])
-
-    # Track ALL predecessors (not just best one)
-    predecessors: Dict[int, List[int]] = {n: [] for n in node_ids}
-    # Track longest path length and best predecessor for chain reconstruction
-    longest_len: Dict[int, int] = {n: 1 for n in node_ids}
-    best_pred: Dict[int, Optional[int]] = {n: None for n in node_ids}
-
-    for node in sorted_nodes:
-        node_gidx = node_order[node]
-        for nb in neighbors[node]:
-            nb_gidx = node_order[nb]
-            if nb_gidx > node_gidx:
-                # node → nb is a valid directed edge (earlier → later)
-                predecessors[nb].append(node)
-                if longest_len[node] + 1 > longest_len[nb]:
-                    longest_len[nb] = longest_len[node] + 1
-                    best_pred[nb] = node
-
-    # Build successor map by inverting predecessors
-    successors: Dict[int, List[int]] = {n: [] for n in node_ids}
-    for n, preds in predecessors.items():
-        for p in preds:
-            successors[p].append(n)
-
-    # HEADs = nodes with empty predecessors list
-    heads = {node_to_key[n] for n in node_ids if not predecessors[n]}
-
-    # Convert back to window keys
-    return CascadeResult(
-        heads=heads,
-        predecessors={node_to_key[n]: [node_to_key[p] for p in preds]
-                      for n, preds in predecessors.items()},
-        successors={node_to_key[n]: [node_to_key[s] for s in succs]
-                    for n, succs in successors.items()},
-        longest_path_length={node_to_key[n]: length for n, length in longest_len.items()},
-        best_predecessor={node_to_key[n]: (node_to_key[p] if p is not None else None)
-                          for n, p in best_pred.items()},
-    )
+    depth = 0
+    while True:
+        cur_gidx = collectives_to_order.get(current, 0)
+        prev_key: Optional[WindowKey] = None
+        prev_gidx = -1
+        for k, ws in window_stats.items():
+            if rank not in ws.rank_stats:
+                continue
+            g = collectives_to_order.get(k, 0)
+            if g >= cur_gidx:
+                continue
+            if g > prev_gidx:
+                prev_gidx = g
+                prev_key = k
+        if prev_key is None:
+            return current, depth
+        if rank not in window_stats[prev_key].straggler_ranks:
+            return current, depth
+        current = prev_key
+        depth += 1
 
 
-def get_longest_chain_from_head(
-    head: WindowKey,
-    cascade: CascadeResult,
-) -> List[WindowKey]:
-    """Walk forward from HEAD following longest downstream path."""
-    chain = [head]
-    current = head
-    while cascade.successors.get(current):
-        # Pick successor with longest remaining path
-        succs = cascade.successors[current]
-        best = max(succs, key=lambda s: cascade.longest_path_length.get(s, 0))
-        chain.append(best)
-        current = best
-    return chain
-
-
-def get_full_dag_from_head(
-    head: WindowKey,
-    cascade: CascadeResult,
-) -> List[Tuple[WindowKey, int]]:
+def find_origins(
+    window_stats: Dict[WindowKey, WindowStats],
+    collectives_to_order: Dict[WindowKey, int],
+) -> List[Origin]:
     """
-    BFS from HEAD, returning (window_key, depth) pairs for tree rendering.
-    Each node appears once at its first-encountered depth.
+    For each rank flagged at the anchor, run a backward walk. Return all
+    origins sorted by gidx ascending. Independent chains are preserved.
     """
-    result: List[Tuple[WindowKey, int]] = []
-    visited: Set[WindowKey] = set()
-    queue: List[Tuple[WindowKey, int]] = [(head, 0)]
-
-    while queue:
-        node, depth = queue.pop(0)
-        if node in visited:
-            continue
-        visited.add(node)
-        result.append((node, depth))
-        for succ in sorted(cascade.successors.get(node, []),
-                           key=lambda s: cascade.longest_path_length.get(s, 0),
-                           reverse=True):
-            if succ not in visited:
-                queue.append((succ, depth + 1))
-
-    return result
+    anchor = find_anchor(window_stats, collectives_to_order)
+    if anchor is None:
+        return []
+    anchor_ws = window_stats[anchor]
+    if not anchor_ws.straggler_ranks:
+        return []
+    origins: List[Origin] = []
+    for rank in anchor_ws.straggler_ranks:
+        origin_key, depth = backward_walk(rank, anchor, window_stats, collectives_to_order)
+        origins.append(Origin(rank=rank, window_key=origin_key, walk_depth=depth))
+    origins.sort(key=lambda o: collectives_to_order.get(o.window_key, 0))
+    return origins
 
 
 # ---------------------------------------------------------------------------
@@ -759,14 +697,12 @@ def load_ground_truth(trace_dir: str) -> Optional[dict]:
 def print_summary(
     all_window_stats: Dict[WindowKey, WindowStats],
     collectives_to_order: Dict[WindowKey, int],
-    cascade: CascadeResult,
+    origins: List[Origin],
     pg_filter: Optional[str] = None,
-    verbose_cascade: bool = False,
 ):
-    """Print summary table of windows with stragglers, plus cascade chains from HEADs."""
+    """Print summary table of flagged windows, plus origins from backward walks."""
     logger.info("\n=== Straggler Analysis Summary ===\n")
 
-    # Header
     logger.info(
         f"{'GIdx':>4} | {'PG Desc':<40} | {'Win':>3} | {'Ranks':>20} | {'Straggler':>8} | {'Signal':<40}"
     )
@@ -777,7 +713,7 @@ def print_summary(
 
     for key in sorted(all_window_stats.keys(), key=lambda k: collectives_to_order.get(k, 0)):
         ws = all_window_stats[key]
-        megatron_id, pg_desc, window_idx = key
+        _, pg_desc, window_idx = key
 
         if pg_filter and pg_filter.upper() not in pg_desc.upper():
             continue
@@ -801,42 +737,17 @@ def print_summary(
 
     logger.info(f"\nWindows with stragglers: {straggler_window_count}/{total_windows}")
 
-    # Cascade chains from HEADs
-    if cascade.heads:
-        logger.info("\n=== Cascade Chains (from HEADs) ===\n")
-        sorted_heads = sorted(cascade.heads, key=lambda k: collectives_to_order.get(k, 0))
-
-        for head_idx, head in enumerate(sorted_heads):
-            head_ws = all_window_stats[head]
-            head_gidx = collectives_to_order.get(head, -1)
-            head_ranks = ",".join(sorted(head_ws.straggler_ranks, key=int))
-            megatron_id, pg_desc, window_idx = head
-
-            logger.info(f"  HEAD {head_idx}: [{head_gidx}] {pg_desc} win={window_idx} (straggler rank(s): {head_ranks})")
-
-            if verbose_cascade:
-                # Full DAG rendering with indentation
-                dag = get_full_dag_from_head(head, cascade)
-                for node, depth in dag[1:]:  # Skip head (already printed)
-                    ws = all_window_stats[node]
-                    gidx = collectives_to_order.get(node, -1)
-                    _, node_pg_desc, node_win_idx = node
-                    straggler_str = ",".join(sorted(ws.straggler_ranks, key=int))
-                    indent = "    " + "  " * depth
-                    logger.info(f"{indent}→ [{gidx}] {node_pg_desc} win={node_win_idx} straggler={straggler_str}")
-            else:
-                # Longest chain only
-                chain = get_longest_chain_from_head(head, cascade)
-                for node in chain[1:]:  # Skip head (already printed)
-                    ws = all_window_stats[node]
-                    gidx = collectives_to_order.get(node, -1)
-                    _, node_pg_desc, node_win_idx = node
-                    straggler_str = ",".join(sorted(ws.straggler_ranks, key=int))
-                    logger.info(f"      → [{gidx}] {node_pg_desc} win={node_win_idx} straggler={straggler_str}")
-
-            logger.info("")  # Blank line between HEADs
+    if origins:
+        logger.info("\n=== Origins (backward walks from terminal default_pg) ===\n")
+        for o in origins:
+            _, pg_desc, win_idx = o.window_key
+            gidx = collectives_to_order.get(o.window_key, -1)
+            logger.info(
+                f"  rank {o.rank}: origin = [{gidx}] {pg_desc} win={win_idx} "
+                f"(walked back {o.walk_depth} step{'s' if o.walk_depth != 1 else ''})"
+            )
     else:
-        logger.info("\nNo HEADs found (no straggler windows).")
+        logger.info("\nNo origins found (anchor has no flagged ranks).")
 
 
 def print_detailed(
@@ -930,10 +841,7 @@ def analyze(trace_dir: str, verbose: bool = False, pg_filter: Optional[str] = No
             k: float = 3.0, floor_ms: float = 20.0):
     """Run the full analysis pipeline."""
 
-    # 1. Load
-    collectives_by_file, pg_configs, pg_status = load_trace_dir(trace_dir)
-
-    # 2. Window (two-pass: row compaction → column ordering)
+    collectives_by_file, _pg_configs, _pg_status = load_trace_dir(trace_dir)
     windows, collectives_to_order = group_collectives_by_windows(collectives_by_file)
     logger.info(f"\nWindowing produced {len(windows)} unique window groups:")
     for key in sorted(windows.keys(), key=lambda k: collectives_to_order.get(k, 0)):
@@ -942,7 +850,6 @@ def analyze(trace_dir: str, verbose: bool = False, pg_filter: Optional[str] = No
         gidx = collectives_to_order.get(key, -1)
         logger.info(f"  [gidx={gidx}] ({megatron_id}, {pg_desc}, win={window_idx}): {len(windows[key])} entries, ranks={sorted(ranks, key=int)}")
 
-    # 3. Per-window stats + straggler identification
     logger.info(f"\nComputing per-window statistics (k={k}, floor_ms={floor_ms})...")
     all_window_stats: Dict[Tuple[str, str, int], WindowStats] = {}
     for key, colls in windows.items():
@@ -950,297 +857,75 @@ def analyze(trace_dir: str, verbose: bool = False, pg_filter: Optional[str] = No
     straggler_count = sum(1 for ws in all_window_stats.values() if ws.straggler_ranks)
     logger.info(f"  {len(all_window_stats)} windows analyzed, {straggler_count} with stragglers")
 
-    # 4. Build cascade graph and find HEADs
-    logger.info("\nBuilding cascade graph...")
-    cascade = build_cascade_graph(all_window_stats, collectives_to_order)
-    logger.info(f"  {len(cascade.heads)} HEADs found")
+    logger.info("\nFinding origins via backward walk from terminal default_pg...")
+    origins = find_origins(all_window_stats, collectives_to_order)
+    logger.info(f"  {len(origins)} origin(s) found")
 
-    # 5. Output
     if verbose:
         print_detailed(all_window_stats, collectives_to_order, pg_filter)
 
-    print_summary(all_window_stats, collectives_to_order, cascade, pg_filter, verbose)
+    print_summary(all_window_stats, collectives_to_order, origins, pg_filter)
 
-    # 6. Ground truth
     ground_truth = load_ground_truth(trace_dir)
     print_ground_truth_comparison(all_window_stats, ground_truth)
 
 
-def test_synthetic_abc():
-    """
-    Test the A/B/C synthetic case from the bug description.
-
-    Nodes: A (gidx=0, 2 ranks), B (gidx=1, 8 ranks), C (gidx=2, 2 ranks)
-    Edges: A↔B, B↔C (B shares ranks with both)
-    Expected: HEAD = {A}, chain = A → B → C
-    """
-    print("\n=== Synthetic A/B/C Test ===\n")
-
-    # Create mock WindowStats
-    key_a: WindowKey = ("mg_a", "PG_A", 2)
-    key_b: WindowKey = ("mg_b", "PG_B", 2)
-    key_c: WindowKey = ("mg_c", "PG_C", 2)
-
-    # A has ranks {0, 1}, B has ranks {0,1,2,3,4,5,6,7}, C has ranks {6, 7}
-    # A↔B share {0,1}, B↔C share {6,7}, A and C don't share
-    window_stats: Dict[WindowKey, WindowStats] = {
-        key_a: WindowStats(
-            key=key_a,
-            rank_stats={"0": None, "1": None},  # type: ignore
-            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
-            straggler_ranks={"0"}, straggler_signal="test",
-        ),
-        key_b: WindowStats(
-            key=key_b,
-            rank_stats={str(i): None for i in range(8)},  # type: ignore
-            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
-            straggler_ranks={"3"}, straggler_signal="test",
-        ),
-        key_c: WindowStats(
-            key=key_c,
-            rank_stats={"6": None, "7": None},  # type: ignore
-            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
-            straggler_ranks={"7"}, straggler_signal="test",
-        ),
-    }
-
-    collectives_to_order: Dict[WindowKey, int] = {
-        key_a: 0,
-        key_b: 1,
-        key_c: 2,
-    }
-
-    cascade = build_cascade_graph(window_stats, collectives_to_order)
-
-    print(f"HEADs: {cascade.heads}")
-    print(f"Expected: {{('mg_a', 'PG_A', 2)}}")
-    assert cascade.heads == {key_a}, f"Expected HEAD={{A}}, got {cascade.heads}"
-
-    print(f"\nPredecessors[A]: {cascade.predecessors[key_a]}")
-    print(f"Predecessors[B]: {cascade.predecessors[key_b]}")
-    print(f"Predecessors[C]: {cascade.predecessors[key_c]}")
-    assert cascade.predecessors[key_a] == [], f"A should have no predecessors"
-    assert cascade.predecessors[key_b] == [key_a], f"B should have A as predecessor"
-    assert cascade.predecessors[key_c] == [key_b], f"C should have B as predecessor"
-
-    chain = get_longest_chain_from_head(key_a, cascade)
-    print(f"\nLongest chain from A: {chain}")
-    assert chain == [key_a, key_b, key_c], f"Expected [A,B,C], got {chain}"
-
-    print("\n✓ Synthetic A/B/C test PASSED\n")
-
-
-def test_synthetic_branching():
-    """
-    Test a branching case: A → B, A → C (A has two successors).
-
-    Nodes: A (gidx=0), B (gidx=1), C (gidx=2)
-    A shares ranks with both B and C. B and C don't share.
-    Expected: HEAD = {A}, full DAG shows both branches.
-    """
-    print("\n=== Synthetic Branching Test ===\n")
-
-    key_a: WindowKey = ("mg_a", "PG_A", 2)
-    key_b: WindowKey = ("mg_b", "PG_B", 2)
-    key_c: WindowKey = ("mg_c", "PG_C", 2)
-
-    # A has ranks {0,1,2,3}, B has {0,1}, C has {2,3}
-    # A↔B share {0,1}, A↔C share {2,3}, B and C don't share
-    window_stats: Dict[WindowKey, WindowStats] = {
-        key_a: WindowStats(
-            key=key_a,
-            rank_stats={"0": None, "1": None, "2": None, "3": None},  # type: ignore
-            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
-            straggler_ranks={"0"}, straggler_signal="test",
-        ),
-        key_b: WindowStats(
-            key=key_b,
-            rank_stats={"0": None, "1": None},  # type: ignore
-            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
-            straggler_ranks={"1"}, straggler_signal="test",
-        ),
-        key_c: WindowStats(
-            key=key_c,
-            rank_stats={"2": None, "3": None},  # type: ignore
-            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
-            straggler_ranks={"3"}, straggler_signal="test",
-        ),
-    }
-
-    collectives_to_order: Dict[WindowKey, int] = {
-        key_a: 0,
-        key_b: 1,
-        key_c: 2,
-    }
-
-    cascade = build_cascade_graph(window_stats, collectives_to_order)
-
-    print(f"HEADs: {cascade.heads}")
-    assert cascade.heads == {key_a}, f"Expected HEAD={{A}}, got {cascade.heads}"
-
-    print(f"Successors[A]: {cascade.successors[key_a]}")
-    assert set(cascade.successors[key_a]) == {key_b, key_c}, f"A should have B and C as successors"
-
-    dag = get_full_dag_from_head(key_a, cascade)
-    print(f"Full DAG from A: {dag}")
-    assert len(dag) == 3, f"DAG should have 3 nodes"
-
-    print("\n✓ Synthetic branching test PASSED\n")
-
-
 def analyze_quiet(trace_dir: str, k: float, floor_ms: float) -> dict:
-    """Run analysis without logging, return summary stats for grid sweep."""
-    collectives_by_file, pg_configs, pg_status = load_trace_dir(trace_dir)
+    """Run analysis without logging, return summary stats. Used by the monitor."""
+    collectives_by_file, _pg_configs, _pg_status = load_trace_dir(trace_dir)
     windows, collectives_to_order = group_collectives_by_windows(collectives_by_file)
 
     all_window_stats: Dict[Tuple[str, str, int], WindowStats] = {}
     for key, colls in windows.items():
         all_window_stats[key] = compute_window_stats(key, colls, k=k, floor_ms=floor_ms)
 
-    cascade = build_cascade_graph(all_window_stats, collectives_to_order)
+    origins = find_origins(all_window_stats, collectives_to_order)
 
-    ground_truth = load_ground_truth(trace_dir)
+    ground_truth = load_ground_truth(trace_dir) or {}
     inject_type = ground_truth.get("inject_type", "none")
     inject_rank = ground_truth.get("inject_rank")
 
     straggler_count = sum(1 for ws in all_window_stats.values() if ws.straggler_ranks)
-    head_straggler_ranks = set()
-    for head_key in cascade.heads:
-        ws = all_window_stats.get(head_key)
-        if ws:
-            head_straggler_ranks.update(ws.straggler_ranks)
+    origin_ranks: Set[str] = {o.rank for o in origins}
+    origin_payload = [
+        {
+            "rank": o.rank,
+            "pg_desc": o.window_key[1],
+            "window_idx": o.window_key[2],
+            "gidx": collectives_to_order.get(o.window_key, -1),
+            "walk_depth": o.walk_depth,
+        }
+        for o in origins
+    ]
 
-    hit = inject_rank is not None and str(inject_rank) in head_straggler_ranks
+    hit = inject_rank is not None and str(inject_rank) in origin_ranks
 
     return {
         "inject_type": inject_type,
         "inject_rank": inject_rank,
         "n_windows": len(windows),
         "n_straggler_windows": straggler_count,
-        "n_heads": len(cascade.heads),
-        "head_straggler_ranks": head_straggler_ranks,
+        "n_origins": len(origins),
+        # Backwards-compat field name for monitor verdict consumers — same set,
+        # now sourced from origins instead of cascade-graph HEADs.
+        "head_straggler_ranks": origin_ranks,
+        "n_heads": len(origins),
+        "origins": origin_payload,
         "hit": hit,
     }
 
 
-def grid_sweep(trace_dirs: List[str]):
-    """Run grid sweep over k and floor_ms values."""
-    k_values = [1.5, 2.0, 3.0]
-    floor_values = [5.0, 10.0, 20.0]
-
-    print("\n" + "=" * 80)
-    print("GRID SWEEP: Single-worst-outlier with gap-to-runner-up")
-    print("=" * 80)
-
-    # Categorize traces
-    baselines = []
-    injections = []
-    for td in trace_dirs:
-        gt = load_ground_truth(td)
-        if gt.get("inject_type") == "none":
-            baselines.append(td)
-        else:
-            injections.append((td, gt))
-
-    print(f"\nTraces: {len(baselines)} baseline, {len(injections)} injection")
-    for td, gt in injections:
-        print(f"  - {os.path.basename(td)}: {gt.get('inject_type')} rank {gt.get('inject_rank')} @ {gt.get('inject_delay_ms')}ms")
-
-    # Run grid
-    results = []
-    for k in k_values:
-        for floor_ms in floor_values:
-            row = {"k": k, "floor_ms": floor_ms}
-
-            # Baseline HEADs
-            baseline_heads = []
-            for td in baselines:
-                r = analyze_quiet(td, k, floor_ms)
-                baseline_heads.append(r["n_heads"])
-            row["baseline_heads"] = baseline_heads
-
-            # Injection hits
-            injection_hits = []
-            for td, gt in injections:
-                r = analyze_quiet(td, k, floor_ms)
-                injection_hits.append({
-                    "name": os.path.basename(td),
-                    "inject_rank": gt.get("inject_rank"),
-                    "hit": r["hit"],
-                    "n_heads": r["n_heads"],
-                    "head_ranks": r["head_straggler_ranks"],
-                })
-            row["injection_hits"] = injection_hits
-
-            results.append(row)
-
-    # Print results table
-    print("\n" + "-" * 80)
-    print(f"{'k':>4} | {'floor':>5} | {'baseline #HEADs':>15} | injection HEADs contain injected rank?")
-    print("-" * 80)
-
-    passing_cells = []
-    for row in results:
-        k, floor_ms = row["k"], row["floor_ms"]
-        bh = row["baseline_heads"]
-        baseline_str = ",".join(str(h) for h in bh) if len(bh) <= 3 else f"max={max(bh)}"
-
-        hits = row["injection_hits"]
-        hit_strs = []
-        all_hit = True
-        for h in hits:
-            mark = "✓" if h["hit"] else "✗"
-            hit_strs.append(f"r{h['inject_rank']}:{mark}")
-            if not h["hit"]:
-                all_hit = False
-
-        # Pass criteria: baseline ≤1 HEAD each, all injections hit
-        baseline_pass = all(h <= 1 for h in bh)
-        if baseline_pass and all_hit:
-            passing_cells.append((k, floor_ms))
-
-        status = "PASS" if (baseline_pass and all_hit) else ""
-        print(f"{k:>4.1f} | {floor_ms:>5.0f} | {baseline_str:>15} | {' '.join(hit_strs)} {status}")
-
-    print("-" * 80)
-
-    if passing_cells:
-        # Pick most conservative (largest k, then largest floor_ms)
-        best = max(passing_cells, key=lambda x: (x[0], x[1]))
-        print(f"\n✓ BEST CELL: k={best[0]}, floor_ms={best[1]} (most conservative passing)")
-    else:
-        print("\n✗ NO PASSING CELL — review results above")
-
-    return results
-
-
 def main():
-    parser = argparse.ArgumentParser(description="FR Straggler Analyzer")
-    parser.add_argument("trace_dir", nargs="?", help="Path to trace directory containing _dump_*.json files")
+    parser = argparse.ArgumentParser(description="FR Straggler Analyzer (block-based)")
+    parser.add_argument("trace_dir", help="Path to a block directory containing _dump_*.json files")
     parser.add_argument("-v", "--verbose", action="store_true", help="Detailed per-rank per-window output")
     parser.add_argument("--pg", default=None, help="Filter output to PGs matching this substring")
     parser.add_argument("--k", type=float, default=3.0,
                         help="Stdev multiplier for gap threshold (default: 3.0)")
     parser.add_argument("--floor-ms", type=float, default=20.0,
                         help="Minimum gap threshold in ms (default: 20.0)")
-    parser.add_argument("--test", action="store_true", help="Run synthetic tests")
-    parser.add_argument("--grid-sweep", nargs="+", metavar="TRACE_DIR",
-                        help="Run grid sweep on multiple trace directories")
     args = parser.parse_args()
 
-    if args.test:
-        test_synthetic_abc()
-        test_synthetic_branching()
-        return
-
-    if args.grid_sweep:
-        grid_sweep(args.grid_sweep)
-        return
-
-    if not args.trace_dir:
-        parser.error("trace_dir is required unless --test or --grid-sweep is specified")
-
-    # Auto-save output to {trace_dir}/analysis.log alongside run_config.log
     log_path = os.path.join(args.trace_dir, "analysis.log")
     file_handler = logging.FileHandler(log_path, mode="w")
     file_handler.setFormatter(logging.Formatter("%(message)s"))

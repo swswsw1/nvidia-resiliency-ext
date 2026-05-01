@@ -345,12 +345,6 @@ def group_collectives_by_windows(
     # Pass 2: Cross-rank ordering
     grouped_windows, collectives_to_order = _order_windows_globally(windows_by_rank)
 
-    # Filter out default_pg: it includes all ranks, so any timing variance makes it
-    # a false-positive HEAD that sweeps everything downstream into one cascade.
-    # Stragglers don't originate in default_pg — it's just init coordination.
-    # grouped_windows = {k: v for k, v in grouped_windows.items() if k[1] != "default_pg"}
-    # collectives_to_order = {k: v for k, v in collectives_to_order.items() if k[1] != "default_pg"}
-
     logger.info(f"Pass 2 (column ordering): {len(grouped_windows)} unique window groups")
 
     return grouped_windows, collectives_to_order
@@ -380,6 +374,11 @@ class WindowStats:
     median_gpu_duration_us: float
     straggler_ranks: Set[str]  # ranks flagged as stragglers
     straggler_signal: str  # which signal flagged them
+
+
+def get_window_ranks(ws: WindowStats) -> Set[str]:
+    """Observed participating ranks for a window."""
+    return set(ws.rank_stats.keys())
 
 
 def compute_window_stats(
@@ -527,6 +526,15 @@ class CascadeResult:
     best_predecessor: Dict[WindowKey, Optional[WindowKey]]  # For longest chain reconstruction
 
 
+@dataclass
+class Segment:
+    """Reset-bounded contiguous slice of globally ordered windows."""
+    index: int
+    keys: List[WindowKey]
+    segment_type: str  # "complete" or "open_tail"
+    terminal_reset: Optional[WindowKey]
+
+
 def build_cascade_graph(
     window_stats: Dict[WindowKey, WindowStats],
     collectives_to_order: Dict[WindowKey, int],
@@ -561,7 +569,7 @@ def build_cascade_graph(
 
     # Participating ranks per window (full membership, not just stragglers)
     node_ranks: Dict[int, Set[str]] = {
-        key_to_node[k]: set(ws.rank_stats.keys()) for k, ws in straggler_windows.items()
+        key_to_node[k]: get_window_ranks(ws) for k, ws in straggler_windows.items()
     }
 
     # Build undirected adjacency (directionality applied at traversal time)
@@ -613,6 +621,60 @@ def build_cascade_graph(
         longest_path_length={node_to_key[n]: length for n, length in longest_len.items()},
         best_predecessor={node_to_key[n]: (node_to_key[p] if p is not None else None)
                           for n, p in best_pred.items()},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4.5 Reset-bounded segmentation
+# ---------------------------------------------------------------------------
+
+def partition_reset_bounded_segments(
+    all_window_stats: Dict[WindowKey, WindowStats],
+    collectives_to_order: Dict[WindowKey, int],
+    world_ranks: Set[str],
+) -> List[Segment]:
+    """
+    Partition ordered windows into reset-bounded segments.
+
+    A reset window is any window observed on exactly all world ranks. Complete
+    segments end at a reset window, inclusive. Any trailing windows after the
+    last reset become an open_tail segment.
+    """
+    ordered_keys = sorted(all_window_stats.keys(), key=lambda k: collectives_to_order.get(k, 0))
+    segments: List[Segment] = []
+    current_keys: List[WindowKey] = []
+
+    for key in ordered_keys:
+        current_keys.append(key)
+        if get_window_ranks(all_window_stats[key]) == world_ranks:
+            segments.append(Segment(
+                index=len(segments),
+                keys=current_keys,
+                segment_type="complete",
+                terminal_reset=key,
+            ))
+            current_keys = []
+
+    if current_keys:
+        segments.append(Segment(
+            index=len(segments),
+            keys=current_keys,
+            segment_type="open_tail",
+            terminal_reset=None,
+        ))
+
+    return segments
+
+
+def filter_maps_to_segment(
+    all_window_stats: Dict[WindowKey, WindowStats],
+    collectives_to_order: Dict[WindowKey, int],
+    segment: Segment,
+) -> Tuple[Dict[WindowKey, WindowStats], Dict[WindowKey, int]]:
+    """Filter window stats and ordering maps to one segment."""
+    return (
+        {k: all_window_stats[k] for k in segment.keys},
+        {k: collectives_to_order[k] for k in segment.keys},
     )
 
 
@@ -684,9 +746,10 @@ def print_summary(
     cascade: CascadeResult,
     pg_filter: Optional[str] = None,
     verbose_cascade: bool = False,
+    title: str = "Straggler Analysis Summary",
 ):
     """Print summary table of windows with stragglers, plus cascade chains from HEADs."""
-    logger.info("\n=== Straggler Analysis Summary ===\n")
+    logger.info(f"\n=== {title} ===\n")
 
     # Header
     logger.info(
@@ -759,6 +822,118 @@ def print_summary(
             logger.info("")  # Blank line between HEADs
     else:
         logger.info("\nNo HEADs found (no straggler windows).")
+
+
+def print_combined_segmented_summary(
+    all_window_stats: Dict[WindowKey, WindowStats],
+    collectives_to_order: Dict[WindowKey, int],
+    segments: List[Segment],
+    pg_filter: Optional[str] = None,
+):
+    """Print one global window table with inline reset-bounded segment separators."""
+    logger.info("\n=== Global Window Table (Segment-Bounded) ===\n")
+    logger.info(
+        f"{'GIdx':>4} | {'Seg':>5} | {'Type':<10} | {'PG Desc':<40} | {'Win':>3} | {'Ranks':>20} | {'Straggler':>8} | {'Signal':<40}"
+    )
+    logger.info("-" * 150)
+
+    total_windows = 0
+    straggler_window_count = 0
+
+    for segment in segments:
+        start_gidx = collectives_to_order.get(segment.keys[0], -1) if segment.keys else -1
+        end_gidx = collectives_to_order.get(segment.keys[-1], -1) if segment.keys else -1
+        if segment.segment_type == "open_tail":
+            label = f"Segment {segment.index} open_tail / lower confidence, gidx {start_gidx}..{end_gidx}"
+        else:
+            label = f"Segment {segment.index} complete, gidx {start_gidx}..{end_gidx}"
+        logger.info(f"--- {label} ---")
+
+        for key in sorted(segment.keys, key=lambda k: collectives_to_order.get(k, 0)):
+            ws = all_window_stats[key]
+            _, pg_desc, window_idx = key
+
+            if pg_filter and pg_filter.upper() not in pg_desc.upper():
+                continue
+
+            total_windows += 1
+            gidx = collectives_to_order.get(key, -1)
+            ranks_str = ",".join(str(r) for r in sorted(int(r) for r in get_window_ranks(ws)))
+
+            if ws.straggler_ranks:
+                straggler_window_count += 1
+                straggler_str = ",".join(sorted(ws.straggler_ranks, key=int))
+                signal_str = ws.straggler_signal
+            else:
+                straggler_str = "-"
+                signal_str = ""
+
+            logger.info(
+                f"{gidx:>4} | {segment.index:>5} | {segment.segment_type:<10} | "
+                f"{pg_desc:<40} | {window_idx:>3} | {ranks_str:>20} | "
+                f"{straggler_str:>8} | {signal_str:<40}"
+            )
+
+    logger.info(f"\nWindows with stragglers: {straggler_window_count}/{total_windows}")
+
+
+def print_segment_slices(
+    segments: List[Segment],
+    all_window_stats: Dict[WindowKey, WindowStats],
+    collectives_to_order: Dict[WindowKey, int],
+):
+    """Print where reset-bounded segments slice the global window stream."""
+    logger.info("\n=== Segment Slices ===\n")
+
+    for segment in segments:
+        if not segment.keys:
+            continue
+
+        start_gidx = collectives_to_order.get(segment.keys[0], -1)
+        end_gidx = collectives_to_order.get(segment.keys[-1], -1)
+        straggler_windows = sum(1 for k in segment.keys if all_window_stats[k].straggler_ranks)
+
+        if segment.terminal_reset is None:
+            terminal = "no terminal reset"
+            label = f"Segment {segment.index} ({segment.segment_type} / lower confidence)"
+        else:
+            reset_gidx = collectives_to_order.get(segment.terminal_reset, -1)
+            _, reset_pg_desc, reset_win = segment.terminal_reset
+            terminal = f"terminal reset=[{reset_gidx}] {reset_pg_desc} win={reset_win}"
+            label = f"Segment {segment.index} ({segment.segment_type})"
+
+        logger.info(
+            f"{label}: gidx {start_gidx}..{end_gidx}, {len(segment.keys)} windows, "
+            f"{straggler_windows} straggler windows, {terminal}"
+        )
+
+
+def print_segment_cascade_heads(
+    segment_cascades: List[Tuple[Segment, Dict[WindowKey, WindowStats], Dict[WindowKey, int], CascadeResult]],
+):
+    """Print compact per-segment cascade roots."""
+    logger.info("\n=== Segment Cascade Heads ===\n")
+
+    for segment, segment_stats, segment_order, cascade in segment_cascades:
+        label = f"Segment {segment.index} ({segment.segment_type}"
+        if segment.segment_type == "open_tail":
+            label += " / lower confidence"
+        label += ")"
+
+        if not cascade.heads:
+            logger.info(f"{label}: no HEADs")
+            continue
+
+        logger.info(f"{label}: {len(cascade.heads)} HEAD(s)")
+        for head_idx, head in enumerate(sorted(cascade.heads, key=lambda k: segment_order.get(k, 0))):
+            head_ws = segment_stats[head]
+            head_gidx = segment_order.get(head, -1)
+            _, pg_desc, window_idx = head
+            head_ranks = ",".join(sorted(head_ws.straggler_ranks, key=int))
+            logger.info(
+                f"  HEAD {head_idx}: [{head_gidx}] {pg_desc} win={window_idx} "
+                f"(straggler rank(s): {head_ranks})"
+            )
 
 
 def print_detailed(
@@ -856,14 +1031,9 @@ def analyze(trace_dir: str, verbose: bool = False, pg_filter: Optional[str] = No
     collectives_by_file, pg_configs, pg_status = load_trace_dir(trace_dir)
 
     # 2. Window (two-pass: row compaction → column ordering)
-    # Returns both grouped windows and their global ordering (no default_pg hack)
+    # Returns both grouped windows and their global ordering 
     windows, collectives_to_order = group_collectives_by_windows(collectives_by_file)
-    logger.info(f"\nWindowing produced {len(windows)} unique window groups:")
-    for key in sorted(windows.keys(), key=lambda k: collectives_to_order.get(k, 0)):
-        megatron_id, pg_desc, window_idx = key
-        ranks = set(c.file_id for c in windows[key])
-        gidx = collectives_to_order.get(key, -1)
-        logger.info(f"  [gidx={gidx}] ({megatron_id}, {pg_desc}, win={window_idx}): {len(windows[key])} entries, ranks={sorted(ranks, key=int)}")
+    logger.info(f"\nWindowing produced {len(windows)} unique window groups")
 
     # 3. Per-window stats + straggler identification
     logger.info(f"\nComputing per-window statistics (k={k}, floor_ms={floor_ms})...")
@@ -873,142 +1043,48 @@ def analyze(trace_dir: str, verbose: bool = False, pg_filter: Optional[str] = No
     straggler_count = sum(1 for ws in all_window_stats.values() if ws.straggler_ranks)
     logger.info(f"  {len(all_window_stats)} windows analyzed, {straggler_count} with stragglers")
 
-    # 4. Build cascade graph and find HEADs
-    logger.info("\nBuilding cascade graph...")
-    cascade = build_cascade_graph(all_window_stats, collectives_to_order)
-    logger.info(f"  {len(cascade.heads)} HEADs found")
+    # 4. Reset-bounded segmentation, then build cascade graph per segment
+    world_ranks = set(collectives_by_file.keys())
+    segments = partition_reset_bounded_segments(all_window_stats, collectives_to_order, world_ranks)
+    reset_count = sum(1 for s in segments if s.terminal_reset is not None)
+    logger.info(
+        f"\nReset-bounded segmentation: {len(segments)} segments "
+        f"({reset_count} reset windows, world_ranks={sorted(world_ranks, key=int)})"
+    )
+
+    segment_cascades: List[Tuple[Segment, Dict[WindowKey, WindowStats], Dict[WindowKey, int], CascadeResult]] = []
+    for segment in segments:
+        segment_stats, segment_order = filter_maps_to_segment(
+            all_window_stats, collectives_to_order, segment,
+        )
+        cascade = build_cascade_graph(segment_stats, segment_order)
+        segment_cascades.append((segment, segment_stats, segment_order, cascade))
+
+        if segment.terminal_reset is None:
+            logger.info(
+                f"  segment {segment.index}: {segment.segment_type} / lower confidence, "
+                f"{len(segment.keys)} windows, {len(cascade.heads)} HEADs"
+            )
+        else:
+            reset_gidx = collectives_to_order.get(segment.terminal_reset, -1)
+            _, reset_pg_desc, reset_window_idx = segment.terminal_reset
+            logger.info(
+                f"  segment {segment.index}: {segment.segment_type}, "
+                f"{len(segment.keys)} windows, {len(cascade.heads)} HEADs, "
+                f"terminal reset=[{reset_gidx}] {reset_pg_desc} win={reset_window_idx}"
+            )
 
     # 5. Output
     if verbose:
         print_detailed(all_window_stats, collectives_to_order, pg_filter)
 
-    print_summary(all_window_stats, collectives_to_order, cascade, pg_filter, verbose)
+    print_segment_slices(segments, all_window_stats, collectives_to_order)
+    print_segment_cascade_heads(segment_cascades)
+    print_combined_segmented_summary(all_window_stats, collectives_to_order, segments, pg_filter)
 
     # 6. Ground truth
     ground_truth = load_ground_truth(trace_dir)
     print_ground_truth_comparison(all_window_stats, ground_truth)
-
-
-def test_synthetic_abc():
-    """
-    Test the A/B/C synthetic case from the bug description.
-
-    Nodes: A (gidx=0, 2 ranks), B (gidx=1, 8 ranks), C (gidx=2, 2 ranks)
-    Edges: A↔B, B↔C (B shares ranks with both)
-    Expected: HEAD = {A}, chain = A → B → C
-    """
-    print("\n=== Synthetic A/B/C Test ===\n")
-
-    # Create mock WindowStats
-    key_a: WindowKey = ("mg_a", "PG_A", 0)
-    key_b: WindowKey = ("mg_b", "PG_B", 0)
-    key_c: WindowKey = ("mg_c", "PG_C", 0)
-
-    # A has ranks {0, 1}, B has ranks {0,1,2,3,4,5,6,7}, C has ranks {6, 7}
-    # A↔B share {0,1}, B↔C share {6,7}, A and C don't share
-    window_stats: Dict[WindowKey, WindowStats] = {
-        key_a: WindowStats(
-            key=key_a,
-            rank_stats={"0": None, "1": None},  # type: ignore
-            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
-            straggler_ranks={"0"}, straggler_signal="test",
-        ),
-        key_b: WindowStats(
-            key=key_b,
-            rank_stats={str(i): None for i in range(8)},  # type: ignore
-            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
-            straggler_ranks={"3"}, straggler_signal="test",
-        ),
-        key_c: WindowStats(
-            key=key_c,
-            rank_stats={"6": None, "7": None},  # type: ignore
-            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
-            straggler_ranks={"7"}, straggler_signal="test",
-        ),
-    }
-
-    collectives_to_order: Dict[WindowKey, int] = {
-        key_a: 0,
-        key_b: 1,
-        key_c: 2,
-    }
-
-    cascade = build_cascade_graph(window_stats, collectives_to_order)
-
-    print(f"HEADs: {cascade.heads}")
-    print(f"Expected: {{('mg_a', 'PG_A', 0)}}")
-    assert cascade.heads == {key_a}, f"Expected HEAD={{A}}, got {cascade.heads}"
-
-    print(f"\nPredecessors[A]: {cascade.predecessors[key_a]}")
-    print(f"Predecessors[B]: {cascade.predecessors[key_b]}")
-    print(f"Predecessors[C]: {cascade.predecessors[key_c]}")
-    assert cascade.predecessors[key_a] == [], f"A should have no predecessors"
-    assert cascade.predecessors[key_b] == [key_a], f"B should have A as predecessor"
-    assert cascade.predecessors[key_c] == [key_b], f"C should have B as predecessor"
-
-    chain = get_longest_chain_from_head(key_a, cascade)
-    print(f"\nLongest chain from A: {chain}")
-    assert chain == [key_a, key_b, key_c], f"Expected [A,B,C], got {chain}"
-
-    print("\n✓ Synthetic A/B/C test PASSED\n")
-
-
-def test_synthetic_branching():
-    """
-    Test a branching case: A → B, A → C (A has two successors).
-
-    Nodes: A (gidx=0), B (gidx=1), C (gidx=2)
-    A shares ranks with both B and C. B and C don't share.
-    Expected: HEAD = {A}, full DAG shows both branches.
-    """
-    print("\n=== Synthetic Branching Test ===\n")
-
-    key_a: WindowKey = ("mg_a", "PG_A", 0)
-    key_b: WindowKey = ("mg_b", "PG_B", 0)
-    key_c: WindowKey = ("mg_c", "PG_C", 0)
-
-    # A has ranks {0,1,2,3}, B has {0,1}, C has {2,3}
-    # A↔B share {0,1}, A↔C share {2,3}, B and C don't share
-    window_stats: Dict[WindowKey, WindowStats] = {
-        key_a: WindowStats(
-            key=key_a,
-            rank_stats={"0": None, "1": None, "2": None, "3": None},  # type: ignore
-            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
-            straggler_ranks={"0"}, straggler_signal="test",
-        ),
-        key_b: WindowStats(
-            key=key_b,
-            rank_stats={"0": None, "1": None},  # type: ignore
-            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
-            straggler_ranks={"1"}, straggler_signal="test",
-        ),
-        key_c: WindowStats(
-            key=key_c,
-            rank_stats={"2": None, "3": None},  # type: ignore
-            median_created_offset_ms=0, median_started_offset_ms=0, median_gpu_duration_us=0,
-            straggler_ranks={"3"}, straggler_signal="test",
-        ),
-    }
-
-    collectives_to_order: Dict[WindowKey, int] = {
-        key_a: 0,
-        key_b: 1,
-        key_c: 2,
-    }
-
-    cascade = build_cascade_graph(window_stats, collectives_to_order)
-
-    print(f"HEADs: {cascade.heads}")
-    assert cascade.heads == {key_a}, f"Expected HEAD={{A}}, got {cascade.heads}"
-
-    print(f"Successors[A]: {cascade.successors[key_a]}")
-    assert set(cascade.successors[key_a]) == {key_b, key_c}, f"A should have B and C as successors"
-
-    dag = get_full_dag_from_head(key_a, cascade)
-    print(f"Full DAG from A: {dag}")
-    assert len(dag) == 3, f"DAG should have 3 nodes"
-
-    print("\n✓ Synthetic branching test PASSED\n")
 
 
 def analyze_quiet(trace_dir: str, k: float, floor_ms: float) -> dict:
@@ -1146,22 +1222,16 @@ def main():
                         help="Stdev multiplier for gap threshold (default: 3.0)")
     parser.add_argument("--floor-ms", type=float, default=20.0,
                         help="Minimum gap threshold in ms (default: 20.0)")
-    parser.add_argument("--test", action="store_true", help="Run synthetic tests")
     parser.add_argument("--grid-sweep", nargs="+", metavar="TRACE_DIR",
                         help="Run grid sweep on multiple trace directories")
     args = parser.parse_args()
-
-    if args.test:
-        test_synthetic_abc()
-        test_synthetic_branching()
-        return
 
     if args.grid_sweep:
         grid_sweep(args.grid_sweep)
         return
 
     if not args.trace_dir:
-        parser.error("trace_dir is required unless --test or --grid-sweep is specified")
+        parser.error("trace_dir is required unless --grid-sweep is specified")
 
     # Auto-save output to {trace_dir}/analysis.log alongside run_config.log
     log_path = os.path.join(args.trace_dir, "analysis.log")

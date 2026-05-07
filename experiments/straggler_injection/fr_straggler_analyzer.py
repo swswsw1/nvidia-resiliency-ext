@@ -48,6 +48,7 @@ class Collective:
     time_created_ns: int
     time_discovered_started_ns: Optional[int]
     time_discovered_completed_ns: Optional[int]
+    duration_ms: Optional[float]
     process_group: List[str]  # [megatron_id, pg_desc]
     input_sizes: List[List[int]]
     output_sizes: List[List[int]]
@@ -112,11 +113,12 @@ def load_trace_dir(trace_dir: str) -> Tuple[Dict[str, List[Collective]], Dict[st
                 continue
             if entry.get("state") != "completed":
                 continue
+            p2p_seq_id = entry.get("p2p_seq_id", -1)
             collectives.append(Collective(
                 record_id=entry.get("record_id", -1),
                 file_id=rank_id,
                 collective_seq_id=entry["collective_seq_id"],
-                p2p_seq_id=entry.get("p2p_seq_id", -1),
+                p2p_seq_id=p2p_seq_id,
                 pg_id=entry["pg_id"],
                 op_id=entry.get("op_id", -1),
                 profiling_name=entry.get("profiling_name", ""),
@@ -124,12 +126,13 @@ def load_trace_dir(trace_dir: str) -> Tuple[Dict[str, List[Collective]], Dict[st
                 time_created_ns=entry["time_created_ns"],
                 time_discovered_started_ns=entry.get("time_discovered_started_ns"),
                 time_discovered_completed_ns=entry.get("time_discovered_completed_ns"),
+                duration_ms=entry.get("duration_ms"),
                 process_group=entry["process_group"],
                 input_sizes=entry.get("input_sizes", []),
                 output_sizes=entry.get("output_sizes", []),
                 input_dtypes=entry.get("input_dtypes", []),
                 output_dtypes=entry.get("output_dtypes", []),
-                is_p2p=entry.get("is_p2p", False),
+                is_p2p=p2p_seq_id > 0 or entry.get("is_p2p", False),
             ))
 
         collectives_by_file[rank_id] = collectives
@@ -165,6 +168,10 @@ class Window:
     @property
     def min_time_created_ns(self) -> int:
         return min(e.time_created_ns for e in self.entries)
+
+    @property
+    def max_time_created_ns(self) -> int:
+        return max(e.time_created_ns for e in self.entries)
 
     @property
     def participating_ranks(self) -> Set[str]:
@@ -215,7 +222,7 @@ def _assign_windows_per_rank(
             entry = entries[i]
             megatron_id = entry.process_group[0]
             pg_desc = entry.process_group[1]
-            is_p2p = entry.p2p_seq_id > 0
+            is_p2p = entry.is_p2p
 
             if is_p2p:
                 # P2P: singleton window, window_id = p2p_seq_id
@@ -235,7 +242,7 @@ def _assign_windows_per_rank(
                 while j < len(entries):
                     next_entry = entries[j]
                     next_megatron_id = next_entry.process_group[0]
-                    next_is_p2p = next_entry.p2p_seq_id > 0
+                    next_is_p2p = next_entry.is_p2p
                     if next_is_p2p or next_megatron_id != megatron_id:
                         break
                     window_entries.append(next_entry)
@@ -287,15 +294,23 @@ def _order_windows_globally(
             key = (w.megatron_id, w.window_id)
             groups[key].append(w)
 
-    # Step 2: For each group, compute min timestamp and pg_desc
+    # Step 2: For each group, compute ordering timestamp and pg_desc.
+    # Collectives use earliest enqueue. For P2P in Megatron's pipeline
+    # schedule, the receiver posts recv first;
+    # Latest enqueue therefore selects the sender/data-ready side. 
     group_info: List[Tuple[GroupKey, int, str, List[Window]]] = []
     for key, window_list in groups.items():
-        min_ts = min(w.min_time_created_ns for w in window_list)
+        is_p2p = any(w.is_p2p for w in window_list)
+        order_ts = (
+            max(w.max_time_created_ns for w in window_list)
+            if is_p2p
+            else min(w.min_time_created_ns for w in window_list)
+        )
         # pg_desc should be consistent across windows in the group
         pg_desc = window_list[0].pg_desc
-        group_info.append((key, min_ts, pg_desc, window_list))
+        group_info.append((key, order_ts, pg_desc, window_list))
 
-    # Step 3: Sort by min timestamp
+    # Step 3: Sort by ordering timestamp
     group_info.sort(key=lambda x: x[1])
 
     # Step 4: Build output structures
@@ -354,6 +369,12 @@ def group_collectives_by_windows(
 # 3. Per-window statistics
 # ---------------------------------------------------------------------------
 
+# WindowKey identifies one grouped window across ranks:
+#   (megatron_id, pg_desc, window_idx)
+# For collectives, window_idx is the per-PG occurrence count. 
+# For P2P, window_idx is the p2p_seq_id for one directional transfer.
+WindowKey = Tuple[str, str, int]
+
 @dataclass
 class RankWindowStats:
     """Timing stats for one rank within one window."""
@@ -361,7 +382,7 @@ class RankWindowStats:
     n_entries: int
     mean_created_offset_ms: float   # mean(time_created - window_min_created) in ms
     mean_started_offset_ms: float   # mean(time_started - window_min_started) in ms
-    mean_gpu_duration_us: float     # mean(completed - started) in µs
+    mean_duration_ms: float         # mean(duration_ms) from cudaEventElapsedTime
 
 
 @dataclass
@@ -371,9 +392,18 @@ class WindowStats:
     rank_stats: Dict[str, RankWindowStats]
     median_created_offset_ms: float
     median_started_offset_ms: float
-    median_gpu_duration_us: float
+    median_duration_ms: float
     straggler_ranks: Set[str]  # ranks flagged as stragglers
-    straggler_signal: str  # which signal flagged them
+    straggler_reasons: Dict[str, List[str]]  # rank -> signal(s) that flagged it
+
+    @property
+    def straggler_signal(self) -> str:
+        """Compact display string for summary tables."""
+        parts = []
+        for rank_id in sorted(self.straggler_reasons.keys(), key=int):
+            reasons = "; ".join(self.straggler_reasons[rank_id])
+            parts.append(f"r{rank_id}: {reasons}")
+        return " | ".join(parts)
 
 
 def get_window_ranks(ws: WindowStats) -> Set[str]:
@@ -405,7 +435,7 @@ def compute_window_stats(
         return WindowStats(
             key=window_key, rank_stats={},
             median_created_offset_ms=0, median_started_offset_ms=0,
-            median_gpu_duration_us=0, straggler_ranks=set(), straggler_signal="",
+            median_duration_ms=0, straggler_ranks=set(), straggler_reasons={},
         )
 
     # Compute per-rank means for each signal
@@ -431,26 +461,25 @@ def compute_window_stats(
                 started_offsets.append((c.time_discovered_started_ns - min_started) / 1e6)
         mean_started = sum(started_offsets) / len(started_offsets) if started_offsets else 0.0
 
-        # gpu_duration
-        gpu_durs = []
+        # duration_ms: CUDA-event-measured elapsed time from FR.
+        duration_values = []
         for c in rank_colls:
-            if c.time_discovered_started_ns is not None and c.time_discovered_completed_ns is not None:
-                dur_us = (c.time_discovered_completed_ns - c.time_discovered_started_ns) / 1e3
-                gpu_durs.append(dur_us)
-        mean_gpu_dur = sum(gpu_durs) / len(gpu_durs) if gpu_durs else 0.0
+            if c.duration_ms is not None:
+                duration_values.append(c.duration_ms)
+        mean_duration = sum(duration_values) / len(duration_values) if duration_values else 0.0
 
         rank_stats[rank_id] = RankWindowStats(
             rank_id=rank_id,
             n_entries=len(rank_colls),
             mean_created_offset_ms=mean_created,
             mean_started_offset_ms=mean_started,
-            mean_gpu_duration_us=mean_gpu_dur,
+            mean_duration_ms=mean_duration,
         )
 
     # Compute medians across ranks (kept for reporting, not used in flagging)
     created_values = sorted(rs.mean_created_offset_ms for rs in rank_stats.values())
     started_values = sorted(rs.mean_started_offset_ms for rs in rank_stats.values())
-    gpu_dur_values = sorted(rs.mean_gpu_duration_us for rs in rank_stats.values())
+    duration_values = sorted(rs.mean_duration_ms for rs in rank_stats.values())
 
     def median(vals):
         n = len(vals)
@@ -462,14 +491,16 @@ def compute_window_stats(
 
     med_created = median(created_values)
     med_started = median(started_values)
-    med_gpu_dur = median(gpu_dur_values)
+    med_duration = median(duration_values)
 
     # --- Single-worst-outlier with gap-to-runner-up ---
     straggler_ranks = set()
-    straggler_signal = ""
+    straggler_reasons: Dict[str, List[str]] = defaultdict(list)
+    is_p2p_window = any(c.is_p2p for c in collectives)
+    skip_p2p_warmup = is_p2p_window and window_key[2] <= 2
 
-    if len(rank_stats) >= 2:
-        # Sort ranks by time_created offset descending
+    if len(rank_stats) >= 2 and not skip_p2p_warmup:
+        # time_created: the late CPU enqueue side is the candidate straggler.
         sorted_by_created = sorted(
             rank_stats.items(),
             key=lambda x: x[1].mean_created_offset_ms,
@@ -493,17 +524,124 @@ def compute_window_stats(
 
         if gap > gap_threshold:
             straggler_ranks.add(worst_rank)
-            straggler_signal = f"time_created gap={gap:.1f}ms (thresh={gap_threshold:.1f}ms)"
+            straggler_reasons[worst_rank].append(
+                f"time_created gap={gap:.1f}ms (thresh={gap_threshold:.1f}ms)"
+            )
+
+        if not is_p2p_window:
+            # Collective duration_ms: the late rank joins last, so its CUDA-event
+            # duration is shortest. Use the same gap-to-runner-up test as tc_gap.
+            sorted_by_duration = sorted(
+                (
+                    (rank_id, rs)
+                    for rank_id, rs in rank_stats.items()
+                    if rs.mean_duration_ms > 0
+                ),
+                key=lambda x: x[1].mean_duration_ms,
+            )
+            if len(sorted_by_duration) >= 2:
+                shortest_rank, shortest_rs = sorted_by_duration[0]
+                shortest = shortest_rs.mean_duration_ms
+                runner_up = sorted_by_duration[1][1].mean_duration_ms
+                duration_gap = runner_up - shortest
+
+                if len(sorted_by_duration) <= 2:
+                    duration_threshold = floor_ms
+                else:
+                    non_shortest = [rs.mean_duration_ms for _, rs in sorted_by_duration[1:]]
+                    mean_non_shortest = sum(non_shortest) / len(non_shortest)
+                    variance = sum((x - mean_non_shortest) ** 2 for x in non_shortest) / len(non_shortest)
+                    stdev = math.sqrt(variance)
+                    duration_threshold = max(k * stdev, floor_ms)
+
+                if duration_gap > duration_threshold:
+                    straggler_ranks.add(shortest_rank)
+                    straggler_reasons[shortest_rank].append(
+                        f"duration_ms short gap={duration_gap:.1f}ms "
+                        f"(thresh={duration_threshold:.1f}ms)"
+                    )
 
     return WindowStats(
         key=window_key,
         rank_stats=rank_stats,
         median_created_offset_ms=med_created,
         median_started_offset_ms=med_started,
-        median_gpu_duration_us=med_gpu_dur,
+        median_duration_ms=med_duration,
         straggler_ranks=straggler_ranks,
-        straggler_signal=straggler_signal,
+        straggler_reasons=dict(straggler_reasons),
     )
+
+
+def apply_p2p_duration_detection(
+    all_window_stats: Dict[WindowKey, WindowStats],
+    grouped_windows: Dict[WindowKey, List[Collective]],
+    k: float = 3.0,
+    floor_ms: float = 20.0,
+) -> None:
+    """
+    First-pass P2P duration detector.
+
+    P2P has only two coalesced entries per directional transfer, so there is
+    no meaningful within-window rank distribution. Instead, compare the max
+    duration_ms of each P2P window against the low-duration baseline for the
+    same PG across time. In flagged windows, attribute the straggler to the
+    rank with max(time_created_ns), which is the sender/data-ready side for
+    high-duration P2P windows in the pp2_default_pg traces.
+    """
+    import math
+
+    samples_by_pg: Dict[Tuple[str, str], List[Tuple[WindowKey, float, str]]] = defaultdict(list)
+
+    for key, collectives in grouped_windows.items():
+        if key[2] <= 2:
+            continue
+        if not any(c.is_p2p for c in collectives):
+            continue
+        if len(collectives) != 2:
+            continue
+
+        duration_entries = [c for c in collectives if c.duration_ms is not None]
+        if len(duration_entries) != 2:
+            continue
+
+        signal_ms = max(c.duration_ms or 0.0 for c in duration_entries)
+        sender_rank = max(collectives, key=lambda c: c.time_created_ns).file_id
+        megatron_id, pg_desc, _ = key
+        samples_by_pg[(megatron_id, pg_desc)].append((key, signal_ms, sender_rank))
+
+    def median(vals: List[float]) -> float:
+        n = len(vals)
+        if n == 0:
+            return 0.0
+        if n % 2 == 1:
+            return vals[n // 2]
+        return (vals[n // 2 - 1] + vals[n // 2]) / 2
+
+    for samples in samples_by_pg.values():
+        if len(samples) < 3:
+            continue
+
+        values = sorted(signal_ms for _, signal_ms, _ in samples)
+        baseline_values = values[:max(1, len(values) // 2)]
+        baseline_ms = median(baseline_values)
+
+        if len(baseline_values) <= 1:
+            threshold_ms = floor_ms
+        else:
+            mean_base = sum(baseline_values) / len(baseline_values)
+            variance = sum((x - mean_base) ** 2 for x in baseline_values) / len(baseline_values)
+            threshold_ms = max(k * math.sqrt(variance), floor_ms)
+
+        for key, signal_ms, sender_rank in samples:
+            delta_ms = signal_ms - baseline_ms
+            if delta_ms <= threshold_ms:
+                continue
+            ws = all_window_stats[key]
+            ws.straggler_ranks.add(sender_rank)
+            ws.straggler_reasons.setdefault(sender_rank, []).append(
+                f"p2p recv duration_ms={signal_ms:.1f}ms baseline={baseline_ms:.1f}ms "
+                f"delta={delta_ms:.1f}ms (thresh={threshold_ms:.1f}ms)"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -512,9 +650,6 @@ def compute_window_stats(
 #    Builds an overlap graph of straggler-flagged windows and finds HEADs
 #    (cascade roots) via dynamic programming on global_idx ordering.
 # ---------------------------------------------------------------------------
-
-WindowKey = Tuple[str, str, int]
-
 
 @dataclass
 class CascadeResult:
@@ -952,24 +1087,25 @@ def print_detailed(
         straggler_marker = " [HAS STRAGGLER]" if ws.straggler_ranks else ""
         logger.info(f"\n--- {pg_desc} (megatron_id={megatron_id}, window={window_idx}){straggler_marker} ---")
         logger.info(
-            f"  {'Rank':>6} | {'N':>4} | {'created_offset':>16} | {'started_offset':>16} | {'gpu_dur':>12} |"
+            f"  {'Rank':>6} | {'N':>4} | {'created_offset':>16} | {'started_offset':>16} | {'duration_ms':>12} | Reason"
         )
 
         for rank_id in sorted(ws.rank_stats.keys(), key=int):
             rs = ws.rank_stats[rank_id]
             marker = " <-- STRAGGLER" if rank_id in ws.straggler_ranks else ""
+            reason = "; ".join(ws.straggler_reasons.get(rank_id, []))
             logger.info(
                 f"  {rank_id:>6} | {rs.n_entries:>4} | "
                 f"{rs.mean_created_offset_ms:>13.3f}ms | "
                 f"{rs.mean_started_offset_ms:>13.3f}ms | "
-                f"{rs.mean_gpu_duration_us:>9.1f}us |{marker}"
+                f"{rs.mean_duration_ms:>9.3f}ms | {reason}{marker}"
             )
 
         logger.info(
             f"  {'median':>6} | {'':>4} | "
             f"{ws.median_created_offset_ms:>13.3f}ms | "
             f"{ws.median_started_offset_ms:>13.3f}ms | "
-            f"{ws.median_gpu_duration_us:>9.1f}us |"
+            f"{ws.median_duration_ms:>9.3f}ms |"
         )
 
 
@@ -1040,6 +1176,7 @@ def analyze(trace_dir: str, verbose: bool = False, pg_filter: Optional[str] = No
     all_window_stats: Dict[Tuple[str, str, int], WindowStats] = {}
     for key, colls in windows.items():
         all_window_stats[key] = compute_window_stats(key, colls, k=k, floor_ms=floor_ms)
+    apply_p2p_duration_detection(all_window_stats, windows, k=k, floor_ms=floor_ms)
     straggler_count = sum(1 for ws in all_window_stats.values() if ws.straggler_ranks)
     logger.info(f"  {len(all_window_stats)} windows analyzed, {straggler_count} with stragglers")
 
@@ -1095,6 +1232,7 @@ def analyze_quiet(trace_dir: str, k: float, floor_ms: float) -> dict:
     all_window_stats: Dict[Tuple[str, str, int], WindowStats] = {}
     for key, colls in windows.items():
         all_window_stats[key] = compute_window_stats(key, colls, k=k, floor_ms=floor_ms)
+    apply_p2p_duration_detection(all_window_stats, windows, k=k, floor_ms=floor_ms)
 
     cascade = build_cascade_graph(all_window_stats, collectives_to_order)
 

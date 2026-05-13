@@ -1,0 +1,306 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>nvidia-resiliency-ext &mdash; nvidia-resiliency-ext 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=2709fde1"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="_static/copybutton.js?v=f281be69"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Fault Tolerance" href="fault_tolerance/index.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="#" class="icon icon-home">
+            nvidia-resiliency-ext
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Documentation contents:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="fault_tolerance/index.html">Fault Tolerance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="inprocess/index.html">Inprocess Restart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="checkpointing/async/index.html">Async Checkpointing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="checkpointing/local/index.html">Local Checkpointing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="straggler_det/index.html">Straggler Detection</a></li>
+<li class="toctree-l1"><a class="reference internal" href="attribution/index.html">Failure Attribution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="shared_utils/index.html">Shared Utilities</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="#">nvidia-resiliency-ext</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="#" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">nvidia-resiliency-ext</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/index.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="nvidia-resiliency-ext">
+<h1>nvidia-resiliency-ext<a class="headerlink" href="#nvidia-resiliency-ext" title="Link to this heading"></a></h1>
+<p><strong>nvidia-resiliency-ext</strong> is a set of tools developed by NVIDIA to improve large-scale distributed training resiliency.</p>
+<a class="reference internal image-reference" href="_images/nvrx_docs_source.png"><img alt="Figure highlighting core NVRx features including automatic restart, hierarchical checkpointing, fault detection and health checks." src="_images/nvrx_docs_source.png" style="width: 750px;" />
+</a>
+<section id="features">
+<h2>Features<a class="headerlink" href="#features" title="Link to this heading"></a></h2>
+<ul class="simple">
+<li><p><a class="reference external" href="fault_tolerance/index.html">Hang detection and automatic in-job restarting</a></p></li>
+<li><p><a class="reference external" href="inprocess/index.html">In-process restarting</a></p></li>
+<li><p><a class="reference external" href="checkpointing/async/index.html">Async checkpointing</a></p></li>
+<li><p><a class="reference external" href="checkpointing/local/index.html">Local checkpointing</a></p></li>
+<li><p><a class="reference external" href="straggler_det/index.html">Straggler (slower ranks) detection</a></p></li>
+<li><p><a class="reference external" href="attribution/index.html">Failure attribution</a></p></li>
+<li><p><a class="reference external" href="shared_utils/index.html">Shared utilities and distributed logging</a></p></li>
+</ul>
+<div class="toctree-wrapper compound">
+<p class="caption" role="heading"><span class="caption-text">Documentation contents:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="fault_tolerance/index.html">Fault Tolerance</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="fault_tolerance/usage_guide.html">Usage guide</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/usage_guide.html#terms">Terms</a></li>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/usage_guide.html#design-overview">Design Overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/usage_guide.html#usage-overview">Usage Overview</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="fault_tolerance/integration.html">Integration Guides</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/integration/heartbeats.html">Heartbeats API Integration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/integration/sections.html">Sections API Integration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/integration/ptl.html">PyTorch Lightning Integration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/integration/inprocess.html">FT Launcher &amp; Inprocess integration</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="fault_tolerance/api.html">API documentation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/api/config.html">Config</a></li>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/api/client.html">Client</a></li>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/api/server.html">Server</a></li>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/api/callback.html">Callback</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="fault_tolerance/examples.html">Examples</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/examples/basic_example.html">Basic usage example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/examples/train_ddp_heartbeats.html">Heartbeat API usage example with DDP</a></li>
+<li class="toctree-l3"><a class="reference internal" href="fault_tolerance/examples/train_ddp_sections.html">Section API usage example with DDP</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="inprocess/index.html">Inprocess Restart</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="inprocess/usage_guide.html">Usage Guide</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/usage_guide.html#requirements">Requirements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/usage_guide.html#running-with-slurm">Running with SLURM</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/usage_guide.html#restrictions">Restrictions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/usage_guide.html#functionality-overview">Functionality overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/usage_guide.html#restart-latency">Restart latency</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/usage_guide.html#known-issues">Known issues</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="inprocess/api.html">API documentation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/api/wrap.html">Wrapper</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/api/compose.html">Compose</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/api/state.html">State</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/api/rank_assignment.html">Rank Assignment</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/api/rank_filter.html">Rank Filter</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/api/initialize.html">Initialize</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/api/abort.html">Abort</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/api/finalize.html">Finalize</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/api/health_check.html">Health Check</a></li>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/api/exception.html">Exceptions</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="inprocess/examples.html">Examples</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="inprocess/examples/basic_example.html">Basic usage example</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="checkpointing/async/index.html">Async Checkpointing</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="checkpointing/async/usage_guide.html">Usage guide</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/async/usage_guide.html#implementation-changes-and-evolution">Implementation Changes and Evolution</a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/async/usage_guide.html#synchronization-of-asynchronous-checkpoint-requests">Synchronization of Asynchronous Checkpoint Requests</a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/async/usage_guide.html#using-multi-storage-client-with-async-checkpointing">Using Multi-Storage Client with Async Checkpointing</a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/async/usage_guide.html#best-practices">Best Practices</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="checkpointing/async/api.html">API documentation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/async/api/core.html">Asynchronous Checkpoint Core Utilities</a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/async/api/filesystem_async.html">Asynchronous FileSystemWriter Implementation</a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/async/api/state_dict_saver.html">Asynchronous Pytorch Distributed Checkpoint save with optimized <cite>FileSystemWriter</cite></a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/async/api/torch_ckpt.html">Asynchronous PyTorch <cite>torch.save</cite> with the Core utility</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="checkpointing/async/examples.html">Examples</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/async/examples/basic_example.html">Basic usage example</a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/async/examples/writer_example.html">FileSystemWriter example</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="checkpointing/local/index.html">Local Checkpointing</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="checkpointing/local/usage_guide.html">Usage guide</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/local/usage_guide.html#requirements">Requirements</a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/local/usage_guide.html#restrictions">Restrictions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/local/usage_guide.html#functionality-overview">Functionality Overview</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="checkpointing/local/api.html">API documentation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/local/api/callback.html">PTL Callback support</a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/local/api/base_ckpt_manager.html">BaseCheckpointManager</a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/local/api/local_ckpt_manager.html">LocalCheckpointManager</a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/local/api/replication.html">Replication</a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/local/api/base_state_dict.html">BaseTensorAwareStateDict</a></li>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/local/api/basic_state_dict.html">BasicTensorAwareStateDict</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="checkpointing/local/examples.html">Examples</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="checkpointing/local/examples/basic_example.html">Basic usage example</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="straggler_det/index.html">Straggler Detection</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="straggler_det/usage_guide.html">Usage guide</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="straggler_det/usage_guide.html#design-overview">Design Overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="straggler_det/usage_guide.html#usage-overview">Usage Overview</a></li>
+<li class="toctree-l3"><a class="reference internal" href="straggler_det/usage_guide.html#integration-guide">Integration Guide</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="straggler_det/api.html">API documentation</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="straggler_det/api/straggler.html">Straggler</a></li>
+<li class="toctree-l3"><a class="reference internal" href="straggler_det/api/reporting.html">Reporting</a></li>
+<li class="toctree-l3"><a class="reference internal" href="straggler_det/api/statistics.html">Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="straggler_det/api/callback.html">Callback</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="straggler_det/examples.html">Examples</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="straggler_det/examples/basic_example.html">Basic usage example</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="attribution/index.html">Failure Attribution</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="attribution/features/index.html">Attribution Feature Requirements</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="attribution/features/progressive-ft-launcher-attribution.html">Progressive FT Launcher Attribution</a></li>
+<li class="toctree-l3"><a class="reference internal" href="attribution/features/requirements-template.html">Attribution Feature Requirements Template</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="shared_utils/index.html">Shared Utilities</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="shared_utils/logger_guide.html">NVRx Logger Guide</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/logger_guide.html#key-features">Key Features</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/logger_guide.html#architecture">Architecture</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/logger_guide.html#configuration">Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/logger_guide.html#basic-usage">Basic Usage</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/logger_guide.html#node-local-temporary-logging-setup">Node Local Temporary Logging Setup</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/logger_guide.html#advanced-configuration">Advanced Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/logger_guide.html#example-output-format">Example Output Format</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/logger_guide.html#integration-with-other-nvrx-components">Integration with Other NVRx Components</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/logger_guide.html#best-practices">Best Practices</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/logger_guide.html#troubleshooting">Troubleshooting</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="shared_utils/config_reference.html">Configuration Reference</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/config_reference.html#environment-variables">Environment Variables</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/config_reference.html#python-api-parameters">Python API Parameters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/config_reference.html#logmanager-constructor-parameters">LogManager Constructor Parameters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/config_reference.html#configuration-examples">Configuration Examples</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/config_reference.html#slurm-integration">SLURM Integration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/config_reference.html#docker-integration">Docker Integration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/config_reference.html#kubernetes-integration">Kubernetes Integration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/config_reference.html#configuration-precedence">Configuration Precedence</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/config_reference.html#best-practices">Best Practices</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/config_reference.html#filesystem-selection">Filesystem Selection</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/config_reference.html#troubleshooting">Troubleshooting</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/config_reference.html#quick-api-reference">Quick API Reference</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="shared_utils/api.html">API Reference</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/api.html#log-manager">Log Manager</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/api.html#module-nvidia_resiliency_ext.shared_utils.log_aggregator">Log Aggregator</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/api.html#log-configuration">Log Configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/api.html#core-classes">Core Classes</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/api.html#core-functions">Core Functions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="shared_utils/api.html#quick-reference">Quick Reference</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</div>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="fault_tolerance/index.html" class="btn btn-neutral float-right" title="Fault Tolerance" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

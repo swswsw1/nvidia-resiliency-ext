@@ -1,0 +1,549 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../../">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Asynchronous FileSystemWriter Implementation &mdash; nvidia-resiliency-ext 0.1 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/css/theme.css?v=9edc463e" />
+      <link rel="stylesheet" type="text/css" href="../../../_static/copybutton.css?v=76b2166b" />
+
+  
+      <script src="../../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../../_static/documentation_options.js?v=2709fde1"></script>
+      <script src="../../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../../_static/sphinx_highlight.js?v=dc90522c"></script>
+      <script src="../../../_static/clipboard.min.js?v=a7894cd8"></script>
+      <script src="../../../_static/copybutton.js?v=f281be69"></script>
+    <script src="../../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../../genindex.html" />
+    <link rel="search" title="Search" href="../../../search.html" />
+    <link rel="next" title="Asynchronous Pytorch Distributed Checkpoint save with optimized FileSystemWriter" href="state_dict_saver.html" />
+    <link rel="prev" title="Asynchronous Checkpoint Core Utilities" href="core.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../../index.html" class="icon icon-home">
+            nvidia-resiliency-ext
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Documentation contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../../fault_tolerance/index.html">Fault Tolerance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../inprocess/index.html">Inprocess Restart</a></li>
+<li class="toctree-l1 current"><a class="reference internal" href="../index.html">Async Checkpointing</a><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="../usage_guide.html">Usage guide</a></li>
+<li class="toctree-l2 current"><a class="reference internal" href="../api.html">API documentation</a><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="core.html">Asynchronous Checkpoint Core Utilities</a></li>
+<li class="toctree-l3 current"><a class="current reference internal" href="#">Asynchronous FileSystemWriter Implementation</a><ul>
+<li class="toctree-l4"><a class="reference internal" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.ConsistentDataIdentifier"><code class="docutils literal notranslate"><span class="pre">ConsistentDataIdentifier</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync"><code class="docutils literal notranslate"><span class="pre">FileSystemWriterAsync</span></code></a></li>
+<li class="toctree-l4"><a class="reference internal" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.get_write_results_queue"><code class="docutils literal notranslate"><span class="pre">get_write_results_queue()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="state_dict_saver.html">Asynchronous Pytorch Distributed Checkpoint save with optimized <cite>FileSystemWriter</cite></a></li>
+<li class="toctree-l3"><a class="reference internal" href="torch_ckpt.html">Asynchronous PyTorch <cite>torch.save</cite> with the Core utility</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../examples.html">Examples</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../local/index.html">Local Checkpointing</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../straggler_det/index.html">Straggler Detection</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../attribution/index.html">Failure Attribution</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../shared_utils/index.html">Shared Utilities</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../../index.html">nvidia-resiliency-ext</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Async Checkpointing</a></li>
+          <li class="breadcrumb-item"><a href="../api.html">API documentation</a></li>
+      <li class="breadcrumb-item active">Asynchronous FileSystemWriter Implementation</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="../../../_sources/checkpointing/async/api/filesystem_async.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="module-nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async">
+<span id="asynchronous-filesystemwriter-implementation"></span><h1>Asynchronous FileSystemWriter Implementation<a class="headerlink" href="#module-nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async" title="Link to this heading"></a></h1>
+<p>Storage writer for PyT Distributed format allowing asynchronous save.</p>
+<dl class="py class">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.ConsistentDataIdentifier">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.</span></span><span class="sig-name descname"><span class="pre">ConsistentDataIdentifier</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">key</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#ConsistentDataIdentifier"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.ConsistentDataIdentifier" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
+<p>Identifier for consistent data structure stored in worker cache.</p>
+<p>This allows passing a lightweight identifier instead of pickling
+the entire data structure (which includes IPC handles) across process boundaries.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>key</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync">
+<em class="property"><span class="pre">class</span><span class="w"> </span></em><span class="sig-prename descclassname"><span class="pre">nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.</span></span><span class="sig-name descname"><span class="pre">FileSystemWriterAsync</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">separation_hint</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_msc</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">is_multiproc_io</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_cached_data_structure</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_cpu_shm_for_gpu_tensors</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync" title="Link to this definition"></a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.checkpoint.html#torch.distributed.checkpoint.FileSystemWriter" title="(in PyTorch v2.12)"><code class="xref py py-class docutils literal notranslate"><span class="pre">FileSystemWriter</span></code></a></p>
+<p>Async-enabled implementation of FileSystemWriter using file I/O.</p>
+<p>This class does not spawn the async process itself but relies on an external async mechanism.</p>
+<p><strong>Flow:</strong></p>
+<ol class="arabic simple">
+<li><p>Call <cite>write_data</cite></p></li>
+<li><p>Externally start an async process with <cite>get_save_function_and_args</cite> and its arguments.</p></li>
+<li><p>The async function calls <cite>write_preloaded_data_multithread</cite> (threads) or
+<cite>write_preloaded_data_multiproc</cite> (processes) across multiple workers.</p></li>
+<li><p>Once saving is finalized on all ranks, call <cite>super().finish</cite> with the results stored in <cite>self.writer_result</cite>.</p></li>
+</ol>
+<p><strong>Note:</strong> Step (3) can also be executed synchronously.</p>
+<p>Currently, it is assumed that a separate writer is created for each ckpt save
+(intermediate state is stored as writer attributes).</p>
+<p>Initialize the writer pointing to <cite>path</cite>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>path</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>PathLike</em></a>) – directory where the checkpoint will be written to.</p></li>
+<li><p><strong>single_file_per_rank</strong> – Produce one file per rank instead of one file per tensor/blob. Default to True.</p></li>
+<li><p><strong>sync_files</strong> – force files to be synced to permanent storage. Default to True.</p></li>
+<li><p><strong>thread_count</strong> – Number of IO threads to use to write. Default to 1.</p></li>
+<li><p><strong>per_thread_copy_ahead</strong> – How many bytes to copy from the GPU ahead of saving then. Default 10Mb.</p></li>
+<li><p><strong>cache_staged_state_dict</strong> – Whether to cache the staged state_dict. This option decreases staging latency
+at the cost of increases memory usage. Additionally, if this parameter is set to True, it’s the expectation
+that the stager is maintained and reused for multiple dcp.async_save calls. Default to False.</p></li>
+<li><p><strong>overwrite</strong> – Whether to allow overwriting existing checkpoints. Defaults to True.</p></li>
+<li><p><strong>_extensions</strong> – Extensions to apply to output streams (EXPERIMENTAL)</p></li>
+<li><p><strong>separation_hint</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><em>None</em>)</p></li>
+<li><p><strong>use_msc</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>)</p></li>
+<li><p><strong>is_multiproc_io</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>)</p></li>
+<li><p><strong>use_cached_data_structure</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>)</p></li>
+<li><p><strong>use_cpu_shm_for_gpu_tensors</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>)</p></li>
+</ul>
+</dd>
+</dl>
+<ol class="upperalpha simple" start="14">
+<li><ol class="upperalpha simple" start="2">
+<li><p>If sync_files is disabled, there’s no guarantee that the checkpoint will be consistent in the case of a failure.</p></li>
+</ol>
+</li>
+</ol>
+<dl class="py property">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.checkpoint_id">
+<em class="property"><span class="pre">property</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">checkpoint_id</span></span><em class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><span class="pre">PathLike</span></a></em><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.checkpoint_id" title="Link to this definition"></a></dt>
+<dd><p>return the checkpoint_id that will be used to save the checkpoint.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.cleanup_tensor_caches">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">cleanup_tensor_caches</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.cleanup_tensor_caches"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.cleanup_tensor_caches" title="Link to this definition"></a></dt>
+<dd><p>Release training-side tensor caches and invalidate the identifier set.</p>
+<p>Must be called whenever the worker process is restarted.  A fresh worker
+has an empty <code class="docutils literal notranslate"><span class="pre">_worker_data_cache</span></code>, so both paths need re-priming:</p>
+<ul class="simple">
+<li><p><strong>CPU shm path</strong> (<code class="docutils literal notranslate"><span class="pre">use_cpu_shm_for_gpu_tensors=True</span></code>): clears
+<code class="docutils literal notranslate"><span class="pre">_shm_tensor_cache</span></code> so the next checkpoint re-allocates shm tensors
+and sends them to the worker instead of sending <code class="docutils literal notranslate"><span class="pre">None</span></code> (which would
+cause a worker-side cache miss).</p></li>
+<li><p><strong>GPU IPC path</strong> (<code class="docutils literal notranslate"><span class="pre">use_cached_data_structure=True</span></code>): clearing
+<code class="docutils literal notranslate"><span class="pre">_cached_identifiers</span></code> forces the next checkpoint to re-send the GPU
+tensor IPC handles rather than assuming the worker already has them.</p></li>
+</ul>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.finish">
+<span class="sig-name descname"><span class="pre">finish</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">metadata</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">results</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.finish"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.finish" title="Link to this definition"></a></dt>
+<dd><p>Finish the checkpointing process.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>metadata</strong> (<em>Metadata</em>) – metadata to save</p></li>
+<li><p><strong>results</strong> (<em>List</em><em>[</em><em>List</em><em>[</em><em>WriteResult</em><em>]</em><em>]</em>) – results to save</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.get_save_function_and_args">
+<span class="sig-name descname"><span class="pre">get_save_function_and_args</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.get_save_function_and_args"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.get_save_function_and_args" title="Link to this definition"></a></dt>
+<dd><p>Get function that saves the data to storage along with its arguments.
+Allows the external caller to apply the save function synchronously or asynchronously.</p>
+<dl class="simple">
+<dt>Returns: None (if there is nothing to write on this rank) or a tuple of:</dt><dd><ol class="arabic simple">
+<li><p>the function that saves the data.</p></li>
+<li><p>the function that stages the GPU tensors to a destination for async checkpointing.
+This function should be self-contained.</p></li>
+<li><p>arguments to that function in 1).</p></li>
+</ol>
+</dd>
+</dl>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Tuple" title="(in Python v3.14)"><em>Tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Callable" title="(in Python v3.14)"><em>Callable</em></a> | None, <a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Callable" title="(in Python v3.14)"><em>Callable</em></a> | None, <a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.14)"><em>List</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.preload_tensors">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">preload_tensors</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">resolved_plan_data</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">non_blocking</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.preload_tensors"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.preload_tensors" title="Link to this definition"></a></dt>
+<dd><p>Creates write_buckets and preloads tensors to host memory.</p>
+<p>This runs in the persistent worker process. Bucket creation is done here
+(not in prepare_write_data) so that cached GPU tensor data stored in the
+worker process can be retrieved and reused without re-pickling.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>resolved_plan_data</strong> (<em>Tuple</em>) – <p>Tuple containing
+(checkpoint_dir, (identifier, data_structure)) where:
+- identifier: ConsistentDataIdentifier (caching) or None
+- data_structure: (separation_hint, cached_tensor_data,</p>
+<blockquote>
+<div><p>uncached_tensor_data, byte_io_data, thread_count, storage_plan)</p>
+</div></blockquote>
+</p></li>
+<li><p><strong>non_blocking</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a><em>, </em><em>optional</em>) – Enable pinned D2H memcpy. Default is True.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>List of write buckets with tensors moved to CPU</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>List[WriteBucket]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.prepare_decentralized_global_plan">
+<span class="sig-name descname"><span class="pre">prepare_decentralized_global_plan</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">local_plan</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.prepare_decentralized_global_plan"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.prepare_decentralized_global_plan" title="Link to this definition"></a></dt>
+<dd><p>Instead of assigning indices by plan order, uses PyT rank (same outcome).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>local_plan</strong> (<em>SavePlan</em>) – local plan to turn to a global plan
+(without interactions with other ranks)</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><dl class="simple">
+<dt>SavePlan - locally transformed plan equivalent to the plan that would be</dt><dd><p>created by the coordinator</p>
+</dd>
+</dl>
+</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.checkpoint.html#torch.distributed.checkpoint.SavePlan" title="(in PyTorch v2.12)"><em>SavePlan</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.prepare_local_plan">
+<span class="sig-name descname"><span class="pre">prepare_local_plan</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">plan</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.prepare_local_plan"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.prepare_local_plan" title="Link to this definition"></a></dt>
+<dd><p>Prepare the local plan for the checkpointing process.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>plan</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.checkpoint.html#torch.distributed.checkpoint.SavePlan" title="(in PyTorch v2.12)"><em>SavePlan</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.checkpoint.html#torch.distributed.checkpoint.SavePlan" title="(in PyTorch v2.12)"><em>SavePlan</em></a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.prepare_write_data">
+<span class="sig-name descname"><span class="pre">prepare_write_data</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">plan</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">planner</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.prepare_write_data"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.prepare_write_data" title="Link to this definition"></a></dt>
+<dd><p>First stage of async saving. Resolve data and store in compact format.</p>
+<p>Separates data into GPU tensors (potentially cacheable), CPU tensors (always fresh),
+and ByteIO (always fresh). Bucket creation is deferred to <cite>preload_tensors</cite> so that
+it can run in the persistent worker process and take advantage of the data cache.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>plan</strong> (<em>SavePlan</em>) – save plan generated by the PyT Distributed compatible planner</p></li>
+<li><p><strong>planner</strong> (<em>SavePlanner</em>) – save planner used to resolve the bytes and tensor data</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+<p>Returns: None, but stores the resolved plan data in instance attributes</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.register_shm_drain_callback">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">register_shm_drain_callback</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">fn</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.register_shm_drain_callback"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.register_shm_drain_callback" title="Link to this definition"></a></dt>
+<dd><p>Register (or clear with None) the blocking drain called before reusing shm tensors.</p>
+<p>AsyncCallsQueue registers this when cpu_shm_mode=True so that
+prepare_write_data drains any in-flight write before overwriting shm tensors.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>fn</strong> (<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Callable" title="(in Python v3.14)"><em>Callable</em></a><em>[</em><em>[</em><em>]</em><em>, </em><em>None</em><em>] </em><em>| </em><em>None</em>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.retrieve_write_results">
+<span class="sig-name descname"><span class="pre">retrieve_write_results</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.retrieve_write_results"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.retrieve_write_results" title="Link to this definition"></a></dt>
+<dd><dl class="simple">
+<dt>Turn the latest dict including write results from <cite>self.results_queue</cite></dt><dd><p>into a single results lists. Includes error check.</p>
+</dd>
+<dt>Returns (Union(List[WriteResult], WRAPPED_EXCEPTION): the list of write results</dt><dd><p>from all local workers performing the save, or a WRAPPED_EXCEPTION if
+an exception was raised during the writing process.</p>
+</dd>
+</dl>
+<dl class="field-list simple">
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.14)"><em>List</em></a>[<em>WriteResult</em>] | <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)">tuple</a>[<a class="reference external" href="https://docs.python.org/3/library/exceptions.html#BaseException" title="(in Python v3.14)">BaseException</a>, <a class="reference external" href="https://docs.python.org/3/library/traceback.html#traceback.StackSummary" title="(in Python v3.14)"><em>StackSummary</em></a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.validate_checkpoint_id">
+<em class="property"><span class="pre">classmethod</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">validate_checkpoint_id</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">checkpoint_id</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.validate_checkpoint_id"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.validate_checkpoint_id" title="Link to this definition"></a></dt>
+<dd><p>Validate the checkpoint_id that will be used to save the checkpoint.</p>
+<p>This method is available in PyTorch 2.3 and above.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>checkpoint_id</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>PathLike</em></a>)</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)">bool</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.write_data">
+<span class="sig-name descname"><span class="pre">write_data</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">plan</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">planner</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.write_data"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.write_data" title="Link to this definition"></a></dt>
+<dd><p>Write all items from <code class="docutils literal notranslate"><span class="pre">plan</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>plan</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.checkpoint.html#torch.distributed.checkpoint.SavePlan" title="(in PyTorch v2.12)"><em>SavePlan</em></a>)</p></li>
+<li><p><strong>planner</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/distributed.checkpoint.html#torch.distributed.checkpoint.SavePlanner" title="(in PyTorch v2.12)"><em>SavePlanner</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.pytorch.org/docs/stable/futures.html#torch.futures.Future" title="(in PyTorch v2.12)"><em>Future</em></a>[<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.14)"><em>List</em></a>[<em>WriteResult</em>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.write_preloaded_data">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">write_preloaded_data</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">transform_list</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">open_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">local_thread_idx</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">write_bucket</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">results_queue</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">count_queue</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_fsync</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.write_preloaded_data"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.write_preloaded_data" title="Link to this definition"></a></dt>
+<dd><p>Performs actual data saving to storage (used by worker threads in multithread mode).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>transform_list</strong> (<em>List</em><em>[</em><em>_StorageWriterTransforms</em><em>]</em>) – streaming transforms list</p></li>
+<li><p><strong>open_file</strong> (<em>Callable</em>) – file open callable</p></li>
+<li><p><strong>local_thread_idx</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – index of the worker thread that performs writing</p></li>
+<li><p><strong>write_bucket</strong> (<em>WriteBucket</em>) – data to write to storage</p></li>
+<li><p><strong>results_queue</strong> (<a class="reference external" href="https://docs.python.org/3/library/queue.html#queue.Queue" title="(in Python v3.14)"><em>queue.Queue</em></a>) – queue to return the write results.
+If None (main-thread worker), result is returned directly.</p></li>
+<li><p><strong>count_queue</strong> (<a class="reference external" href="https://docs.python.org/3/library/queue.html#queue.Queue" title="(in Python v3.14)"><em>queue.Queue</em></a>) – queue to signal worker task completion.
+If None (main-thread worker), skipped.</p></li>
+<li><p><strong>use_fsync</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – if True, calls os.fsync at the end of saving</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Tuple" title="(in Python v3.14)"><em>Tuple</em></a>[<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)">int</a>, <a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.14)"><em>List</em></a>[<em>WriteResult</em>] | <a class="reference external" href="https://docs.python.org/3/library/exceptions.html#Exception" title="(in Python v3.14)">Exception</a>] | None</p>
+</dd>
+</dl>
+<dl class="simple">
+<dt>Returns: None when running in a thread (results put in queue);</dt><dd><p>result tuple when running as main-thread worker (results_queue is None)</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.write_preloaded_data_multiproc">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">write_preloaded_data_multiproc</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">transform_list</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_msc</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">open_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rank</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">write_buckets</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">global_results_queue</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.write_preloaded_data_multiproc"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.write_preloaded_data_multiproc" title="Link to this definition"></a></dt>
+<dd><p>Performs saving data to storage with multiple processes.</p>
+<p>Starts predefined number of processes and uses 2 queues to make sure the results
+are complete:
+- local_results_queue - to send the actual results
+- count_queue - small queue to mark worker as completed</p>
+<p>Using just one queue disallowed proper exception handling.</p>
+<p>This method is meant to be run in a forked subprocess.
+Triggering GC during execution leads to CUDA errors
+(cleaning up tensors owned by the parent process).
+To prevent this, we disable the GC explicitly for this function with _disable_gc.</p>
+<p>Note: requires is_daemon=False on the PersistentAsyncCaller, because daemon
+processes cannot spawn child processes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>transform_list</strong> (<em>List</em><em>[</em><em>_StorageWriterTransforms</em><em>]</em>) – streaming transforms list</p></li>
+<li><p><strong>use_msc</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – flag to indicate use of multi storage client</p></li>
+<li><p><strong>open_file</strong> (<em>Callable</em>) – file open callable</p></li>
+<li><p><strong>rank</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – training rank</p></li>
+<li><p><strong>write_buckets</strong> (<em>List</em><em>[</em><em>WriteBucket</em><em>]</em>) – write plan</p></li>
+<li><p><strong>global_results_queue</strong> (<em>mp.Queue</em>) – mp.Queue to collect Dict[List[WriteResults]]
+(or an Exception) from parallel write processes to the main training process</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+<p>Returns: None</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.write_preloaded_data_multithread">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">write_preloaded_data_multithread</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">transform_list</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_msc</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">open_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">rank</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">write_buckets</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">global_results_queue</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.write_preloaded_data_multithread"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.write_preloaded_data_multithread" title="Link to this definition"></a></dt>
+<dd><p>Performs saving data to storage with multiple threads.</p>
+<p>Uses threads (not processes) so that this can run safely inside a daemon process
+without spawning child processes. The last bucket runs on the calling thread to
+avoid thread creation overhead. Uses two queues for worker coordination:
+- local_results_queue - to collect write results from worker threads
+- count_queue - to signal worker completion (get + task_done / join).</p>
+<p>Triggering GC during execution can lead to CUDA errors when tensors are shared.
+To prevent this, we disable the GC explicitly for this function with _disable_gc.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>transform_list</strong> (<em>List</em><em>[</em><em>_StorageWriterTransforms</em><em>]</em>) – streaming transforms list</p></li>
+<li><p><strong>use_msc</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – flag to indicate use of multi storage client for storage access</p></li>
+<li><p><strong>open_file</strong> (<em>Callable</em>) – file open callable</p></li>
+<li><p><strong>rank</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – training rank</p></li>
+<li><p><strong>write_buckets</strong> (<em>List</em><em>[</em><em>WriteBucket</em><em>]</em>) – write plan</p></li>
+<li><p><strong>global_results_queue</strong> (<em>mp.Queue</em>) – queue to send Dict[List[WriteResults]]
+(or an Exception) back to the main training process</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+<p>Returns: None</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.write_preloaded_data_proc">
+<em class="property"><span class="pre">static</span><span class="w"> </span></em><span class="sig-name descname"><span class="pre">write_preloaded_data_proc</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">transform_list</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">open_file</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">local_proc_idx</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">write_bucket</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">results_queue</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">count_queue</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">use_fsync</span></span></em>, <em class="sig-param"><span class="o"><span class="pre">**</span></span><span class="n"><span class="pre">kwargs</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#FileSystemWriterAsync.write_preloaded_data_proc"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.FileSystemWriterAsync.write_preloaded_data_proc" title="Link to this definition"></a></dt>
+<dd><p>Performs actual data saving to storage (used by worker processes in multiproc mode).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>local_proc_idx</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – index of a local process that performs writing</p></li>
+<li><p><strong>write_bucket</strong> (<em>WriteBucket</em>) – data to write to storage</p></li>
+<li><p><strong>results_queue</strong> (<em>mp.Queue</em>) – queue to return the write results
+to the proxy checkpoint process.</p></li>
+<li><p><strong>count_queue</strong> (<em>mp.JoinableQueue</em>) – queue to marks worker task as completed</p></li>
+<li><p><strong>use_fsync</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – if True, calls os.fsync at the end of saving</p></li>
+<li><p><strong>transform_list</strong> (<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.List" title="(in Python v3.14)"><em>List</em></a><em>[</em><em>_StorageWriterTransforms</em><em>]</em>)</p></li>
+<li><p><strong>open_file</strong> (<a class="reference external" href="https://docs.python.org/3/library/typing.html#typing.Callable" title="(in Python v3.14)"><em>Callable</em></a>)</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+<p>Returns: None, the write results are put into the <cite>results_queue</cite></p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.get_write_results_queue">
+<span class="sig-prename descclassname"><span class="pre">nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.</span></span><span class="sig-name descname"><span class="pre">get_write_results_queue</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">mp_mode</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'spawn'</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../_modules/nvidia_resiliency_ext/checkpointing/async_ckpt/filesystem_async.html#get_write_results_queue"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#nvidia_resiliency_ext.checkpointing.async_ckpt.filesystem_async.get_write_results_queue" title="Link to this definition"></a></dt>
+<dd><p>Get or create a multiprocessing queue for write results.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>mp_mode</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – Multiprocessing context mode. Defaults to ‘spawn’.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Queue for collecting write results.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>mp.Queue</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="core.html" class="btn btn-neutral float-left" title="Asynchronous Checkpoint Core Utilities" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="state_dict_saver.html" class="btn btn-neutral float-right" title="Asynchronous Pytorch Distributed Checkpoint save with optimized FileSystemWriter" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2024, NVIDIA Corporation.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -24,8 +24,6 @@ Public API
 - slice_into_blocks(per_rank_merged)          # all blocks across whole trace
 - select_last_complete_block(blocks)          # most recent block where every rank has the terminal
 - extract_last_block_from_dump(per_rank_merged)   # convenience: slice + select last complete
-
-Pure functions, no I/O side effects beyond reading files in `merge_rank_chunks`.
 """
 
 from __future__ import annotations

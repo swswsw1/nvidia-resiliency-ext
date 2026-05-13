@@ -40,6 +40,5 @@ done
 
 echo "=========================================="
 echo "Sweep ${SWEEP_TAG} complete."
-echo "Each run wrote verdicts.jsonl in its trace dir; summarize with:"
-echo "  python3 summarize_sweep.py traces/"
+echo "Each run wrote verdicts.jsonl in its trace dir."
 echo "=========================================="

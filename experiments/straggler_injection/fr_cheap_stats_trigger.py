@@ -85,19 +85,41 @@ class StragglerTrigger:
         persistence: int = 3,
         device_id: int = 0,
         log_path: Optional[str] = None,
+        offset_ms: float = 1.0,
     ):
         if window_size < 1 or check_freq < 1 or persistence < 1:
             raise ValueError("window_size, check_freq, persistence must all be >= 1")
+        if offset_ms <= 0:
+            raise ValueError("offset_ms must be > 0")
         self._window_size = window_size
         self._check_freq = check_freq
         self._persistence = persistence
         self._device_id = device_id
         self._log_path = log_path
+        # Option 3 — one-sided absolute threshold above median.
+        # A rank is flagged when its mean wait exceeds `median + offset_ms`.
+        # Why one-sided + absolute (not two-sided MAD):
+        #   - MAD breaks in bimodal data (N/2 stragglers): median sits between
+        #     the fast and slow clusters, every rank's deviation ≈ MAD, no rank
+        #     stands out. Empirically observed with 2/4 host injection.
+        #   - Two-sided flagging in bimodal data flags every rank (each is far
+        #     from median in some direction) — no information.
+        #   - At our probe point (end-of-iter dist.barrier), slow ranks have
+        #     LONGER wait times (intra-iter collectives resync first; residual
+        #     reflects GPU-stream-queue position). So one-sided above-median is
+        #     the right sign here. §14's inversion does not hold at this probe.
+        #   - The trigger only needs to fire; the cascade analyzer picks which
+        #     rank is actually the root cause from the dumped block.
+        self._offset_ms = offset_ms
 
         # Rolling state
         self._buffer: Deque[float] = deque(maxlen=window_size)
         self._pending_events: Deque[Tuple[torch.cuda.Event, torch.cuda.Event]] = deque()
-        self._history: Deque[int] = deque(maxlen=persistence)
+        # Per-rank consecutive-flag counters. A rank's counter increments on
+        # every eval where it's flagged as outlier (either direction) and
+        # resets to 0 on any eval where it's NOT flagged. Trigger fires when
+        # any rank's counter reaches persistence.
+        self._flag_counters: Dict[int, int] = {}
 
         # Bookkeeping
         self._call_count = 0
@@ -250,6 +272,20 @@ class StragglerTrigger:
     # ----- Cross-rank evaluation ------------------------------------------
 
     def _evaluate(self):
+        """Two-sided MAD outlier detection + per-rank persistence counters.
+
+        Replaces argmin+unanimity. Why:
+          - argmin picks one rank per eval, which can't represent multi-rank
+            stragglers and flaps under tiny float jitter (see 20260512 two-rank
+            experiment: argmin alternated rank 0/1, silenced unanimity).
+          - The empirical sign of "straggler ↔ wait time" is not stable —
+            §14 of fr_concepts.md predicts shortest=straggler at a pure barrier
+            probe, but at the end-of-iter barrier after fwd/bwd the slow ranks
+            actually have *longer* wait times (intra-iter collectives resync
+            then the residual is GPU-stream-queue-position).
+        Two-sided MAD threshold handles both cases without committing to a sign:
+        any rank far from the median (in either direction) is flagged.
+        """
         local_mean = sum(self._buffer) / len(self._buffer)
 
         # all_gather one float per rank using the SAVED original (defensive
@@ -264,15 +300,32 @@ class StragglerTrigger:
             return
         wait_times = [t.item() for t in gathered]
 
-        # Inversion: shortest mean wait = arrived last = candidate straggler.
-        straggler = min(range(len(wait_times)), key=lambda i: wait_times[i])
-        self._history.append(straggler)
+        # Compute median across ranks; threshold = median + offset.
+        sorted_w = sorted(wait_times)
+        n = len(sorted_w)
+        median = sorted_w[n // 2] if n % 2 else 0.5 * (sorted_w[n // 2 - 1] + sorted_w[n // 2])
+        threshold = median + self._offset_ms
+
+        # Flag every rank whose wait exceeds median + offset (one-sided slow).
+        # For each rank: increment counter if flagged this eval, reset to 0
+        # otherwise. Trigger fires when ANY rank's counter hits persistence.
+        flagged_this_eval = [
+            r for r, w in enumerate(wait_times) if w > threshold
+        ]
+        flagged_set = set(flagged_this_eval)
+        for r in range(self._world_size):
+            if r in flagged_set:
+                self._flag_counters[r] = self._flag_counters.get(r, 0) + 1
+            else:
+                self._flag_counters[r] = 0
+
         self._eval_count += 1
 
-        triggered = (
-            len(self._history) == self._persistence
-            and len(set(self._history)) == 1
+        # Rank(s) whose persistence counter just reached the threshold.
+        triggering_ranks = sorted(
+            r for r, c in self._flag_counters.items() if c >= self._persistence
         )
+        triggered = bool(triggering_ranks)
         if triggered:
             self._dump_requested = True
             self._last_triggered_call_count = self._call_count
@@ -281,8 +334,11 @@ class StragglerTrigger:
             "eval_idx": self._eval_count,
             "call_count": self._call_count,
             "wait_times_ms": wait_times,
-            "straggler_rank": straggler,
-            "history": list(self._history),
+            "median_ms": median,
+            "threshold_ms": threshold,
+            "flagged_ranks": flagged_this_eval,
+            "flag_counters": dict(sorted(self._flag_counters.items())),
+            "triggering_ranks": triggering_ranks,
             "buffer_local_mean_ms": local_mean,
             "dump_triggered": triggered,
         })
@@ -319,7 +375,8 @@ class StragglerTrigger:
             "buffer_window_size": self._window_size,
             "check_freq": self._check_freq,
             "persistence": self._persistence,
-            "history": list(self._history),
+            "offset_ms": self._offset_ms,
+            "flag_counters": dict(self._flag_counters),
             "pending_events": len(self._pending_events),
             "dump_requested": self._dump_requested,
         }
